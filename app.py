@@ -1,104 +1,112 @@
 import requests, time, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Настройки мониторинга
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
-stats = {"longs": 0, "shorts": 0, "exit": 0}
-market_data = {}
+# Настройки
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+session_stats = {"longs": 0, "shorts": 0, "exit": 0}
+current_assets = {} # Для хранения последних данных по каждой монете
 
-class TerminalDashboard(BaseHTTPRequestHandler):
+class ProfessionalTerminal(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
         
-        # Расчет индекса (имитация логики со скрина)
-        total_move = stats['longs'] + stats['shorts'] + 0.1
-        fear_greed = round((stats['longs'] / total_move) * 10, 2)
-        warning = "КИTЫ СБРАСЫВАЮТ ПОЗИЦИИ" if stats['exit'] > stats['longs'] else "КИTЫ НАКАПЛИВАЮТ LONG"
+        # Считаем общую активность
+        total = session_stats['longs'] + session_stats['shorts'] + 0.1
+        ratio = (session_stats['longs'] / total) * 100
 
         html = f"""
-        <html><head><meta http-equiv="refresh" content="10">
+        <html><head><meta http-equiv="refresh" content="15">
         <style>
-            body {{ background: #1a1a1a; color: #d4d4d4; font-family: 'Courier New', monospace; padding: 20px; font-size: 13px; }}
-            .header {{ color: #aaa; border-bottom: 1px double #444; padding-bottom: 5px; }}
-            .session {{ margin: 10px 0; font-weight: bold; }}
-            .green {{ color: #00ff88; }} .red {{ color: #ff4444; }} .yellow {{ color: #ffd700; }}
-            .alert {{ background: #ff7b7b; color: black; padding: 3px 10px; font-weight: bold; display: inline-block; margin: 10px 0; }}
-            table {{ width: 100%; border-collapse: collapse; margin-top: 10px; border-top: 1px dashed #555; border-bottom: 1px dashed #555; }}
-            th {{ text-align: left; padding: 8px 0; color: #888; border-bottom: 1px solid #333; }}
-            td {{ padding: 8px 0; }}
-            .footer {{ margin-top: 15px; color: #aaa; font-style: italic; }}
+            body {{ background: #121212; color: #d4d4d4; font-family: 'Courier New', monospace; padding: 25px; line-height: 1.5; }}
+            .header {{ color: #888; border-bottom: 1px solid #333; padding-bottom: 10px; margin-bottom: 15px; }}
+            .stats-bar {{ background: #1e1e1e; padding: 15px; border-radius: 5px; margin-bottom: 20px; border: 1px solid #333; }}
+            .green {{ color: #4ec9b0; font-weight: bold; }}
+            .red {{ color: #f44747; font-weight: bold; }}
+            .yellow {{ color: #dcdba3; font-weight: bold; }}
+            table {{ width: 100%; border-collapse: collapse; background: #1a1a1a; }}
+            th {{ text-align: left; padding: 12px; color: #666; border-bottom: 2px solid #333; font-size: 12px; }}
+            td {{ padding: 12px; border-bottom: 1px solid #252525; }}
+            .whale {{ font-size: 18px; }}
         </style></head><body>
-            <div class="header">🏛 ALL-IN-ONE TERMINAL | {time.strftime('%H:%M:%S')}</div>
-            <div class="session">
-                📊 СЕССИЯ: &nbsp; LONGS: <span class="green">${stats['longs']/1e6:.1f}M</span> 
-                | SHORTS: <span class="red">${stats['shorts']/1e6:.1f}M</span> 
-                | EXIT: <span class="yellow">${stats['exit']/1e6:.1f}M</span>
-            </div>
-            <div class="alert">⚠️ ВНИМАНИЕ: ИНДЕКС ЖАДНОСТИ {fear_greed} - {warning}</div>
+            <div class="header">STATION: FRANKFURT-DE | TERMINAL ACTIVE | {time.strftime('%H:%M:%S')}</div>
             
+            <div class="stats-bar">
+                📊 <b>УЧЕТ ЗА СЕССИЮ:</b> &nbsp; 
+                ВХОД LONG: <span class="green">${session_stats['longs']/1e6:.2f}M</span> | 
+                ВХОД SHORT: <span class="red">${session_stats['shorts']/1e6:.2f}M</span> | 
+                ВЫХОД (EXIT): <span class="yellow">${session_stats['exit']/1e6:.2f}M</span>
+                <br>
+                <small style="color: #555;">Доминирование покупателей: {ratio:.1f}%</small>
+            </div>
+
             <table>
                 <tr>
-                    <th>Монета</th><th>Bid (Buy)</th><th>Ask (Sell)</th><th>Spread</th>
-                    <th>Вход LONG</th><th>Вход SHORT</th><th>Exit 1m</th><th>Всего OI</th>
+                    <th>АКТИВ</th><th>ТЕКУЩАЯ ЦЕНА</th><th>ИЗМ. OI (ПОСЛЕДНЕЕ)</th><th>СТАТУС</th><th>ВСЕГО В РЫНКЕ</th>
                 </tr>
         """
+        
+        # Выводим монеты строго по порядку
         for s in SYMBOLS:
-            d = market_data.get(s, {})
-            if not d: continue
+            data = current_assets.get(s, {"price": 0, "diff": 0, "status": "WAITING", "total": 0})
+            color = "green" if data['diff'] > 0 else "red" if data['diff'] < 0 else ""
+            whale = "🐳" if abs(data['diff']) > 1000000 else ""
+            
             html += f"""
                 <tr>
-                    <td><b>{s[:3]}</b></td>
-                    <td>{d['bid']:.2f}</td><td>{d['ask']:.2f}</td>
-                    <td>{d['spread']:.4f}%</td>
-                    <td class="green">+{d['l_in']:.0f}k$</td>
-                    <td class="red">+{d['s_in']:.0f}k$</td>
-                    <td class="yellow">{d['exit']:.0f}k$</td>
-                    <td>$ {d['total_oi']/1e6:.1f}M</td>
+                    <td><b>{s}</b></td>
+                    <td>{data['price']:,.2f}$</td>
+                    <td class="{color}">{data['diff']:+,.0f}$</td>
+                    <td><b class="{color}">{data['status']}</b> {whale}</td>
+                    <td>${data['total']/1e6:.1f}M</td>
                 </tr>
             """
-        
+            
         html += """
             </table>
-            <div class="footer">💡 СОВЕТ: Если Вход LONG большой, а Spread растет — киты выкупают лимитные заявки продавцов.</div>
+            <p style="color: #444; margin-top: 20px; font-size: 11px;">* Данные обновляются каждые 15 секунд. Фильтр шума: $30,000.</p>
         </body></html>
         """
         self.wfile.write(html.encode('utf-8'))
     def log_message(self, format, *args): return
 
 def monitor():
-    global market_data, stats
+    global current_assets, session_stats
     history_oi = {}
     while True:
         for s in SYMBOLS:
             try:
-                # Получаем стакан для спреда и цену
-                book = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/bookTicker?symbol={s}").json()
-                oi_data = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}").json()
+                # Получаем цену и Open Interest
+                p_res = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={s}", timeout=5).json()
+                oi_res = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=5).json()
                 
-                bid, ask = float(book['bidPrice']), float(book['askPrice'])
-                price = (bid + ask) / 2
-                oi_usd = float(oi_data['openInterest']) * price
-                spread = ((ask - bid) / ask) * 100
-
-                l_in, s_in, ex = 0, 0, 0
+                price = float(p_res['price'])
+                curr_oi_usd = float(oi_res['openInterest']) * price
+                
                 if s in history_oi:
-                    diff = oi_usd - history_oi[s]
-                    if diff > 10000: # Вход
-                        if spread < 0.005: l_in = diff / 1000; stats['longs'] += diff
-                        else: s_in = diff / 1000; stats['shorts'] += diff
-                    elif diff < -10000: # Выход
-                        ex = abs(diff) / 1000; stats['exit'] += abs(diff)
-
-                market_data[s] = {
-                    "bid": bid, "ask": ask, "spread": spread,
-                    "l_in": l_in, "s_in": s_in, "exit": ex, "total_oi": oi_usd
-                }
-                history_oi[s] = oi_usd
+                    diff = curr_oi_usd - history_oi[s]
+                    
+                    if abs(diff) > 30000: # Фильтр минимальных движений
+                        status = "BUY_VOL" if diff > 0 else "SELL_VOL"
+                        
+                        # Обновляем глобальную статистику сессии
+                        if diff > 0: session_stats['longs'] += diff
+                        else: session_stats['shorts'] += abs(diff)
+                        
+                        # Сохраняем состояние для таблицы
+                        current_assets[s] = {
+                            "price": price, "diff": diff, 
+                            "status": status, "total": curr_oi_usd
+                        }
+                else:
+                    # Начальная инициализация
+                    current_assets[s] = {"price": price, "diff": 0, "status": "START", "total": curr_oi_usd}
+                
+                history_oi[s] = curr_oi_usd
             except: pass
         time.sleep(15)
 
 if __name__ == "__main__":
     threading.Thread(target=monitor, daemon=True).start()
-    HTTPServer(('0.0.0.0', 10000), TerminalDashboard).serve_forever()
+    HTTPServer(('0.0.0.0', 10000), ProfessionalTerminal).serve_forever()
