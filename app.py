@@ -1,84 +1,104 @@
 import requests, time, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Настройки
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-# Порог срабатывания: записывать в ленту только если движение > $100,000
-SENSITIVITY = 100000 
-event_history = [] # Лента событий
+# Настройки мониторинга
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+stats = {"longs": 0, "shorts": 0, "exit": 0}
+market_data = {}
 
-class ColabStyleDashboard(BaseHTTPRequestHandler):
+class TerminalDashboard(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
         
-        html = """
-        <html><head>
-            <meta http-equiv="refresh" content="20">
-            <style>
-                body { font-family: monospace; background: #1c1c1c; color: #d4d4d4; padding: 20px; }
-                .line { border-left: 3px solid #333; padding-left: 15px; margin-bottom: 8px; }
-                .time { color: #888; font-size: 12px; }
-                .symbol { color: #569cd6; font-weight: bold; margin-left: 10px; }
-                .price { color: #ce9178; margin-left: 10px; }
-                .diff { font-weight: bold; margin-left: 10px; }
-                .green { color: #4ec9b0; }
-                .red { color: #f44747; }
-                .whale { font-size: 18px; margin-left: 5px; }
-                h2 { color: #6a9955; font-size: 18px; border-bottom: 1px solid #333; padding-bottom: 10px; }
-            </style>
-        </head><body>
-            <h2>[Binance_Live_Feed_Terminal]</h2>
-        """
-        
-        if not event_history:
-            html += "<p>Сканирование рынка... Ждите крупных сделок...</p>"
-        
-        # Выводим историю: новые сверху
-        for ev in reversed(event_history[-40:]):
-            color = "green" if ev['diff'] > 0 else "red"
-            sign = "+" if ev['diff'] > 0 else ""
-            whale = " 🐳" if abs(ev['diff']) > 1000000 else ""
-            
-            html += f"""
-            <div class="line">
-                <span class="time">[{ev['time']}]</span>
-                <span class="symbol">{ev['symbol']}</span>
-                <span class="price">{ev['price']}$</span>
-                <span class="diff {color}">{sign}{ev['diff']:,.0f}$</span>
-                <span>{ev['status']}</span>{whale}
+        # Расчет индекса (имитация логики со скрина)
+        total_move = stats['longs'] + stats['shorts'] + 0.1
+        fear_greed = round((stats['longs'] / total_move) * 10, 2)
+        warning = "КИTЫ СБРАСЫВАЮТ ПОЗИЦИИ" if stats['exit'] > stats['longs'] else "КИTЫ НАКАПЛИВАЮТ LONG"
+
+        html = f"""
+        <html><head><meta http-equiv="refresh" content="10">
+        <style>
+            body {{ background: #1a1a1a; color: #d4d4d4; font-family: 'Courier New', monospace; padding: 20px; font-size: 13px; }}
+            .header {{ color: #aaa; border-bottom: 1px double #444; padding-bottom: 5px; }}
+            .session {{ margin: 10px 0; font-weight: bold; }}
+            .green {{ color: #00ff88; }} .red {{ color: #ff4444; }} .yellow {{ color: #ffd700; }}
+            .alert {{ background: #ff7b7b; color: black; padding: 3px 10px; font-weight: bold; display: inline-block; margin: 10px 0; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 10px; border-top: 1px dashed #555; border-bottom: 1px dashed #555; }}
+            th {{ text-align: left; padding: 8px 0; color: #888; border-bottom: 1px solid #333; }}
+            td {{ padding: 8px 0; }}
+            .footer {{ margin-top: 15px; color: #aaa; font-style: italic; }}
+        </style></head><body>
+            <div class="header">🏛 ALL-IN-ONE TERMINAL | {time.strftime('%H:%M:%S')}</div>
+            <div class="session">
+                📊 СЕССИЯ: &nbsp; LONGS: <span class="green">${stats['longs']/1e6:.1f}M</span> 
+                | SHORTS: <span class="red">${stats['shorts']/1e6:.1f}M</span> 
+                | EXIT: <span class="yellow">${stats['exit']/1e6:.1f}M</span>
             </div>
+            <div class="alert">⚠️ ВНИМАНИЕ: ИНДЕКС ЖАДНОСТИ {fear_greed} - {warning}</div>
+            
+            <table>
+                <tr>
+                    <th>Монета</th><th>Bid (Buy)</th><th>Ask (Sell)</th><th>Spread</th>
+                    <th>Вход LONG</th><th>Вход SHORT</th><th>Exit 1m</th><th>Всего OI</th>
+                </tr>
+        """
+        for s in SYMBOLS:
+            d = market_data.get(s, {})
+            if not d: continue
+            html += f"""
+                <tr>
+                    <td><b>{s[:3]}</b></td>
+                    <td>{d['bid']:.2f}</td><td>{d['ask']:.2f}</td>
+                    <td>{d['spread']:.4f}%</td>
+                    <td class="green">+{d['l_in']:.0f}k$</td>
+                    <td class="red">+{d['s_in']:.0f}k$</td>
+                    <td class="yellow">{d['exit']:.0f}k$</td>
+                    <td>$ {d['total_oi']/1e6:.1f}M</td>
+                </tr>
             """
         
-        html += "</body></html>"
+        html += """
+            </table>
+            <div class="footer">💡 СОВЕТ: Если Вход LONG большой, а Spread растет — киты выкупают лимитные заявки продавцов.</div>
+        </body></html>
+        """
         self.wfile.write(html.encode('utf-8'))
     def log_message(self, format, *args): return
 
 def monitor():
-    global event_history
+    global market_data, stats
     history_oi = {}
     while True:
         for s in SYMBOLS:
             try:
-                p_data = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={s}", timeout=5).json()
-                oi_data = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=5).json()
-                price = float(p_data['price'])
-                curr_oi_usd = float(oi_data['openInterest']) * price
+                # Получаем стакан для спреда и цену
+                book = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/bookTicker?symbol={s}").json()
+                oi_data = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}").json()
                 
+                bid, ask = float(book['bidPrice']), float(book['askPrice'])
+                price = (bid + ask) / 2
+                oi_usd = float(oi_data['openInterest']) * price
+                spread = ((ask - bid) / ask) * 100
+
+                l_in, s_in, ex = 0, 0, 0
                 if s in history_oi:
-                    diff = curr_oi_usd - history_oi[s]
-                    # РЕГИСТРИРУЕМ ТОЛЬКО ВАЖНЫЕ ДВИЖЕНИЯ
-                    if abs(diff) > SENSITIVITY:
-                        event_history.append({
-                            "time": time.strftime("%H:%M:%S"),
-                            "symbol": s, "price": price, "diff": diff,
-                            "status": "BUY_VOL" if diff > 0 else "SELL_VOL"
-                        })
-                history_oi[s] = curr_oi_usd
+                    diff = oi_usd - history_oi[s]
+                    if diff > 10000: # Вход
+                        if spread < 0.005: l_in = diff / 1000; stats['longs'] += diff
+                        else: s_in = diff / 1000; stats['shorts'] += diff
+                    elif diff < -10000: # Выход
+                        ex = abs(diff) / 1000; stats['exit'] += abs(diff)
+
+                market_data[s] = {
+                    "bid": bid, "ask": ask, "spread": spread,
+                    "l_in": l_in, "s_in": s_in, "exit": ex, "total_oi": oi_usd
+                }
+                history_oi[s] = oi_usd
             except: pass
-        time.sleep(20)
+        time.sleep(15)
 
 if __name__ == "__main__":
     threading.Thread(target=monitor, daemon=True).start()
-    HTTPServer(('0.0.0.0', 10000), ColabStyleDashboard).serve_forever()
+    HTTPServer(('0.0.0.0', 10000), TerminalDashboard).serve_forever()
