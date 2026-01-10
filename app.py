@@ -4,7 +4,6 @@ from pymongo import MongoClient
 from datetime import datetime
 
 MONGO_URL = os.getenv("MONGO_URL")
-# Список монет (можешь добавлять сюда новые)
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 
 # Подключение к БД
@@ -22,7 +21,7 @@ def load_data():
         data = collection.find_one({"date": today})
         if data: return data
     except: pass
-    return {"date": today, "assets": {s: {"longs": 0.0, "shorts": 0.0, "exit": 0.0, "price": 0.0, "oi": 0.0, "action": "WAITING"} for s in SYMBOLS}}
+    return {"date": today, "assets": {s: {"longs": 0.0, "shorts": 0.0, "exit": 0.0, "price": 0.0, "oi": 0.0, "vol": 0.0, "action": "WAITING"} for s in SYMBOLS}}
 
 session_data = load_data()
 
@@ -32,20 +31,25 @@ def monitor():
     while True:
         for s in SYMBOLS:
             try:
-                res_p = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={s}", timeout=5).json()
+                # Запрос цены и объема за 24 часа
+                res_ticker = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={s}", timeout=5).json()
                 res_oi = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=5).json()
-                if 'price' not in res_p or 'openInterest' not in res_oi: continue
                 
-                p = float(res_p['price'])
+                if 'lastPrice' not in res_ticker or 'openInterest' not in res_oi: continue
+                
+                p = float(res_ticker['lastPrice'])
+                vol_usd = float(res_ticker['quoteVolume']) # Объем в USDT за 24ч
                 oi_count = float(res_oi['openInterest'])
-                current_oi_usd = oi_count * p # Считаем OI в долларах
+                current_oi_usd = oi_count * p
+                
+                asset = session_data["assets"][s]
+                asset["price"] = p
+                asset["oi"] = current_oi_usd
+                asset["vol"] = vol_usd # Сохраняем объем
                 
                 if s in prev_oi:
                     d_oi = oi_count - prev_oi[s]
                     d_p = p - prev_p[s]
-                    asset = session_data["assets"][s]
-                    asset["price"] = p
-                    asset["oi"] = current_oi_usd
                     
                     if d_oi > 0:
                         if d_p > 0: 
@@ -55,8 +59,7 @@ def monitor():
                             asset['shorts'] += (d_oi * p)
                             asset['action'] = "💀 AGRESSIVE SELL"
                     elif d_oi < 0:
-                        val = abs(d_oi * p)
-                        asset['exit'] += val
+                        asset['exit'] += abs(d_oi * p)
                         asset['action'] = "💧 EXIT/LIQUIDATION"
                     
                     collection.update_one({"date": session_data["date"]}, {"$set": session_data}, upsert=True)
@@ -73,10 +76,12 @@ class Handler(BaseHTTPRequestHandler):
         rows = ""
         for s, d in session_data["assets"].items():
             color = "#00ff88" if "BUY" in d['action'] else "#ff4444" if "SELL" in d['action'] else "#888"
+            # Рассчитываем соотношение OI к Объему для понимания силы движения
             rows += f"""
             <tr>
                 <td>{s}</td>
                 <td>{d['price']:,.2f}</td>
+                <td style='color:#ccc;'>${d.get('vol',0):,.0f}</td>
                 <td style='color:#00ff88;'>${d.get('longs',0):,.0f}</td>
                 <td style='color:#ff4444;'>${d.get('shorts',0):,.0f}</td>
                 <td style='color:#ffaa00;'>${d.get('exit',0):,.0f}</td>
@@ -89,18 +94,20 @@ class Handler(BaseHTTPRequestHandler):
         <head>
             <meta http-equiv='refresh' content='15'>
             <style>
-                body {{ background: #050505; color: #eee; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }}
-                table {{ border-collapse: collapse; width: 95%; max-width: 1000px; background: #111; border-radius: 10px; overflow: hidden; }}
-                th {{ background: #222; padding: 15px; text-align: left; color: #888; font-size: 12px; }}
-                td {{ padding: 15px; border-bottom: 1px solid #222; font-family: monospace; font-size: 14px; }}
-                h1 {{ color: #00ff88; text-shadow: 0 0 10px rgba(0,255,136,0.3); }}
+                body {{ background: #050505; color: #eee; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }}
+                table {{ border-collapse: collapse; width: 98%; max-width: 1200px; background: #111; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }}
+                th {{ background: #1a1a1a; padding: 15px; text-align: left; color: #666; font-size: 11px; border-bottom: 2px solid #222; }}
+                td {{ padding: 14px; border-bottom: 1px solid #222; font-family: 'Courier New', monospace; font-size: 13px; }}
+                h1 {{ color: #00ff88; margin-bottom: 5px; }}
+                .info {{ color: #444; margin-bottom: 20px; font-size: 12px; }}
             </style>
         </head>
         <body>
-            <h1>MARKET MONITOR v1.1</h1>
+            <h1>MARKET MONITOR v1.2</h1>
+            <div class='info'>24H VOLUME & REAL-TIME ORDERFLOW DATA</div>
             <table>
                 <tr>
-                    <th>SYMBOL</th><th>PRICE</th><th>DAILY LONGS</th><th>DAILY SHORTS</th><th>DAILY EXITS</th><th>OPEN INTEREST</th><th>SIGNAL</th>
+                    <th>SYMBOL</th><th>PRICE</th><th>24H VOLUME</th><th>DAILY LONGS</th><th>DAILY SHORTS</th><th>DAILY EXITS</th><th>OI (USD)</th><th>SIGNAL</th>
                 </tr>
                 {rows}
             </table>
