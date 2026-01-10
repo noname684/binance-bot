@@ -3,8 +3,13 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pymongo import MongoClient
 from datetime import datetime
 
+# Настройки
 MONGO_URL = os.getenv("MONGO_URL")
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT", "1000WHYUSDT", "SUIUSDT", "XRPUSDT"]
+TG_TOKEN = os.getenv("TG_TOKEN")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+
+# Твой актуальный список (добавляй/удаляй здесь)
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT", "SUIUSDT", "XRPUSDT"]
 
 try:
     client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
@@ -12,13 +17,20 @@ try:
     collection = db.daily_stats
 except: pass
 
+def send_tg(msg):
+    if TG_TOKEN and TG_CHAT_ID:
+        try:
+            url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+            requests.post(url, data={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=5)
+        except: pass
+
 def load_data():
     today = datetime.now().strftime("%Y-%m-%d")
     try:
         data = collection.find_one({"date": today})
         if data: return data
     except: pass
-    return {"date": today, "assets": {s: {"longs": 0.0, "shorts": 0.0, "exit": 0.0, "price": 0.0, "oi": 0.0, "vol": 0.0, "fund": 0.0, "action": "WAITING"} for s in SYMBOLS}}
+    return {"date": today, "assets": {}}
 
 session_data = load_data()
 
@@ -35,36 +47,35 @@ def monitor():
                 p = float(r_t['lastPrice'])
                 vol_24h = float(r_t['quoteVolume'])
                 oi_usd = float(r_oi['openInterest']) * p
-                fund = float(r_f.get('lastFundingRate', 0)) * 100
                 
                 if s not in session_data["assets"]:
-                    session_data["assets"][s] = {"longs":0,"shorts":0,"exit":0,"price":0,"oi":0,"vol":0,"fund":0,"action":"WAITING"}
+                    session_data["assets"][s] = {"longs": 0.0, "shorts": 0.0, "exit": 0.0, "price": 0.0, "oi": 0.0, "vol": 0.0, "fund": 0.0, "action": "WAITING"}
                 
                 asset = session_data["assets"][s]
-                asset.update({"price": p, "vol": vol_24h, "oi": oi_usd, "fund": fund})
+                asset.update({"price": p, "vol": vol_24h, "oi": oi_usd, "fund": float(r_f.get('lastFundingRate', 0)) * 100})
 
                 if s in prev_oi:
                     d_oi = oi_usd - prev_oi[s]
                     d_p = p - prev_p[s]
-                    
-                    # Тот самый порог 0.1% от суточного объема
-                    threshold = vol_24h * 0.001 
+                    threshold = vol_24h * 0.001 # Порог 0.1%
                     
                     if abs(d_oi) > threshold:
                         power = int(abs(d_oi) / threshold)
                         fires = "🔥" * min(power, 5)
                         if d_oi > 0:
-                            if d_p > 0: asset['longs'] += d_oi; asset['action'] = f"{fires} BUY"
-                            else: asset['shorts'] += d_oi; asset['action'] = f"💀 SELL"
+                            type_sig = "BUY" if d_p > 0 else "SELL"
+                            asset['action'] = f"{fires} {type_sig}"
+                            if d_p > 0: asset['longs'] += d_oi 
+                            else: asset['shorts'] += d_oi
+                            if power >= 2:
+                                send_tg(f"{fires} <b>{s} SIGNAL</b>\nPrice: {p}\nFlow: ${d_oi:,.0f}\nFund: {asset['fund']:.4f}%")
                         else:
                             asset['exit'] += abs(d_oi)
                             asset['action'] = "💧 EXIT"
-                    else:
-                        asset['action'] = "WAITING"
+                    else: asset['action'] = "WAITING"
                 
                 prev_oi[s], prev_p[s] = oi_usd, p
             except: pass
-        
         collection.update_one({"date": session_data["date"]}, {"$set": session_data}, upsert=True)
         time.sleep(15)
 
@@ -72,15 +83,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.send_header("Content-type", "text/html; charset=utf-8"); self.end_headers()
         rows = ""
-        for s, d in session_data["assets"].items():
+        # ФИЛЬТР: Берем только монеты из списка SYMBOLS
+        for s in SYMBOLS:
+            d = session_data["assets"].get(s)
+            if not d: continue # Если данных по монете еще нет, пропускаем её
+            
             action = d.get('action', 'WAITING')
             clr = "#00ff88" if "BUY" in action else "#ff4444" if "SELL" in action else "#ffaa00" if "EXIT" in action else "#555"
-            fund_clr = "#ff4444" if d.get('fund',0) > 0.02 else "#00ff88" if d.get('fund',0) < 0 else "#888"
-            
+            fund_val = d.get('fund', 0)
+            fund_clr = "#ff4444" if fund_val > 0.03 else "#00ff88" if fund_val < 0 else "#888"
+
             rows += f"""<tr>
                 <td><b>{s}</b></td>
                 <td>{d.get('price',0):,.4f}</td>
-                <td style='color:{fund_clr};'>{d.get('fund',0):.4f}%</td>
+                <td style='color:{fund_clr};'>{fund_val:.4f}%</td>
                 <td style='color:#666;'>${d.get('vol',0):,.0f}</td>
                 <td style='color:#00ff88;'>${d.get('longs',0):,.0f}</td>
                 <td style='color:#ff4444;'>${d.get('shorts',0):,.0f}</td>
@@ -96,7 +112,7 @@ class Handler(BaseHTTPRequestHandler):
             td{{padding:12px;border-bottom:1px solid #111;font-size:12px;}}
             h1{{color:#00ff88;font-size:18px;}}
         </style></head><body>
-            <h1>WHALE TERMINAL v1.8</h1>
+            <h1>WHALE TERMINAL v2.0</h1>
             <table>
                 <tr><th>SYMBOL</th><th>PRICE</th><th>FUNDING</th><th>24H VOL</th><th>LONGS</th><th>SHORTS</th><th>EXITS</th><th>OI (USD)</th><th>SIGNAL</th></tr>
                 {rows}
