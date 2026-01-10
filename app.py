@@ -4,7 +4,7 @@ from pymongo import MongoClient
 from datetime import datetime
 
 MONGO_URL = os.getenv("MONGO_URL")
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT", "1000BONKUSDT", "SUIUSDT", "XRPUSDT"]
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT", "1000WHYUSDT", "SUIUSDT", "XRPUSDT"]
 
 try:
     client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
