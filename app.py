@@ -52,7 +52,7 @@ def monitor():
                         else: asset['shorts'] += d_oi
                     else:
                         asset['exit'] += abs(d_oi)
-                        if abs(d_p/p) > 0.001: asset['liq'] += abs(d_oi)
+                        if abs(d_p/p) > 0.0015: asset['liq'] += abs(d_oi)
                 
                 prev_oi[s], prev_p[s] = oi_usd, p
             except: pass
@@ -65,11 +65,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header("Content-type", "text/html; charset=utf-8"); self.end_headers()
         rows = ""
         for s in SYMBOLS:
-            d = session_data["assets"].get(s, {})
+            d = session_data["assets"].get(s)
+            if not d: continue # Пропускаем, если данных еще нет
+            
             ls = d.get('ls', 0)
             ls_clr = "#ff4444" if ls > 1.8 else "#00ff88" if ls < 0.8 else "#aaa"
             
-            # Расчет Pressure (Дисбаланс входов)
             l, sh = d.get('longs', 0), d.get('shorts', 0)
             total = l + sh
             pressure = ((l - sh) / total * 100) if total > 0 else 0
@@ -80,32 +81,34 @@ class Handler(BaseHTTPRequestHandler):
 
             rows += f"""<tr>
                 <td style='color:#00ff88; font-size:18px;'><b>{s}</b></td>
-                <td style='font-family:monospace;'>{p_str}</td>
+                <td style='font-family:monospace; font-size:16px;'>{p_str}</td>
                 <td style='color:{ls_clr}; font-weight:bold;'>{ls:.2f}</td>
                 <td style='color:{pres_clr}; font-weight:bold;'>{pressure:+.1f}%</td>
-                <td style='color:#777;'>${d.get('vol',0):,.0;f}</td>
-                <td style='color:#00ff88;'>${l:,.0f}</td>
-                <td style='color:#ff4444;'>${sh:,.0f}</td>
+                <td style='color:#666;'>${d.get('vol',0):,.0f}</td>
+                <td style='color:#00ff88; font-weight:bold;'>${l:,.0f}</td>
+                <td style='color:#ff4444; font-weight:bold;'>${sh:,.0f}</td>
                 <td style='color:#ffaa00;'>${d.get('exit',0):,.0f}</td>
-                <td style='color:#ff0055; background:rgba(255,0,85,0.05);'>${d.get('liq',0):,.0f}</td>
+                <td style='color:#ff0055;'>${d.get('liq',0):,.0f}</td>
                 <td style='color:#00d9ff;'>${d.get('oi',0):,.0f}</td>
             </tr>"""
         
-        self.wfile.write(f"""<html><head><meta http-equiv='refresh' content='10'><style>
+        html = f"""<html><head><meta http-equiv='refresh' content='10'><style>
             body {{ background:#050505; color:#eee; font-family:sans-serif; padding:20px; }}
-            table {{ border-collapse:collapse; width:100%; max-width:1600px; background:#0a0a0a; }}
-            th {{ background:#111; padding:15px; color:#444; font-size:10px; text-align:left; border-bottom:2px solid #222; }}
-            td {{ padding:15px; border-bottom:1px solid #111; font-size:15px; }}
+            table {{ border-collapse:collapse; width:100%; max-width:1600px; background:#0a0a0a; border:1px solid #222; }}
+            th {{ background:#111; padding:15px; color:#444; font-size:11px; text-align:left; border-bottom:2px solid #333; }}
+            td {{ padding:18px; border-bottom:1px solid #111; font-size:15px; }}
+            h1 {{ color:#00ff88; letter-spacing:1px; }}
         </style></head><body>
-            <h1>WHALE TERMINAL v2.8</h1>
+            <h1>WHALE TERMINAL v3.0</h1>
             <table>
                 <tr>
-                    <th>SYMBOL</th><th>PRICE</th><th>L/S RATIO</th><th>PRESSURE</th><th>24H VOLUME</th>
-                    <th>LONGS (IN)</th><th>SHORTS (IN)</th><th>EXITS (OUT)</th><th>LIQ</th><th>OPEN INTEREST</th>
+                    <th>SYMBOL</th><th>PRICE</th><th>L/S RATIO</th><th>PRESSURE</th><th>24H VOL</th>
+                    <th>LONGS (IN)</th><th>SHORTS (IN)</th><th>EXITS</th><th>LIQ</th><th>OPEN INTEREST</th>
                 </tr>
                 {rows}
             </table>
-        </body></html>""".encode())
+        </body></html>"""
+        self.wfile.write(html.encode())
 
 if __name__ == "__main__":
     threading.Thread(target=monitor, daemon=True).start()
