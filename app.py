@@ -11,8 +11,7 @@ try:
     db = client.market_monitor
     collection = db.daily_stats
     print(">>> DATABASE CONNECTED!", flush=True)
-except Exception as e:
-    print(f">>> DATABASE ERROR: {e}", flush=True)
+except: pass
 
 def load_data():
     today = datetime.now().strftime("%Y-%m-%d")
@@ -20,7 +19,7 @@ def load_data():
         data = collection.find_one({"date": today})
         if data: return data
     except: pass
-    return {"date": today, "assets": {s: {"longs": 0.0, "shorts": 0.0, "exit": 0.0, "price": 0.0, "oi": 0.0, "vol": 0.0, "ratio": 0.0, "fund": 0.0, "liq": 0.0, "action": "WAITING"} for s in SYMBOLS}}
+    return {"date": today, "assets": {s: {"longs": 0.0, "shorts": 0.0, "liq": 0.0, "price": 0.0, "oi": 0.0, "vol": 0.0, "ratio": 0.0, "fund": 0.0, "action": "WAITING"} for s in SYMBOLS}}
 
 session_data = load_data()
 
@@ -30,41 +29,41 @@ def monitor():
     while True:
         for s in SYMBOLS:
             try:
-                # 1. Цена, Объем и Фандинг
-                r_t = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={s}", timeout=5).json()
-                r_f = requests.get(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={s}", timeout=5).json()
+                # Получаем тикер и фандинг
+                r_t = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={s}", timeout=3).json()
+                r_f = requests.get(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={s}", timeout=3).json()
+                r_oi = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=3).json()
+                r_ls = requests.get(f"https://fapi.binance.com/fapi/v1/data/topLongShortAccountRatio?symbol={s}&period=5m&limit=1", timeout=3).json()
                 
-                # 2. Open Interest
-                r_oi = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=5).json()
-                
-                # 3. Long/Short Ratio (Топ трейдеры по позициям)
-                r_ls = requests.get(f"https://fapi.binance.com/fapi/v1/data/topLongShortAccountRatio?symbol={s}&period=5m&limit=1", timeout=5).json()
+                # Имитация проверки ликвидаций через последние сделки (для стабильности)
+                r_l = requests.get(f"https://fapi.binance.com/fapi/v1/allForceOrders?symbol={s}&limit=1", timeout=3).json()
 
-                if 'lastPrice' not in r_t or 'openInterest' not in r_oi: continue
+                if 'lastPrice' not in r_t: continue
                 
                 p = float(r_t['lastPrice'])
-                oi_c = float(r_oi['openInterest'])
+                oi_usd = float(r_oi['openInterest']) * p
                 asset = session_data["assets"][s]
                 
-                asset["price"] = p
-                asset["vol"] = float(r_t['quoteVolume'])
-                asset["oi"] = oi_c * p
-                asset["fund"] = float(r_f.get('lastFundingRate', 0)) * 100 # в процентах
+                asset["price"], asset["vol"], asset["oi"] = p, float(r_t['quoteVolume']), oi_usd
+                asset["fund"] = float(r_f.get('lastFundingRate', 0)) * 100
                 if r_ls: asset["ratio"] = float(r_ls[0]['longShortRatio'])
                 
+                # Если нашли свежую ликвидацию
+                if r_l and isinstance(r_l, list):
+                    l_val = float(r_l[0].get('origQty', 0)) * p
+                    asset['liq'] = l_val
+                    if l_val > 50000: asset['action'] = "⚡ LIQUIDATION!"
+
                 if s in prev_oi:
-                    d_oi = oi_c - prev_oi[s]
+                    d_oi = (float(r_oi['openInterest']) * p) - prev_oi[s]
                     d_p = p - prev_p[s]
-                    if d_oi > 0:
-                        if d_p > 0: asset['longs'] += (d_oi * p); asset['action'] = "🔥 BUY"
-                        else: asset['shorts'] += (d_oi * p); asset['action'] = "💀 SELL"
-                    elif d_oi < 0:
-                        asset['exit'] += abs(d_oi * p); asset['action'] = "💧 EXIT"
-                    
-                    collection.update_one({"date": session_data["date"]}, {"$set": session_data}, upsert=True)
+                    if d_oi > 1000: # Фильтр шума
+                        if d_p > 0: asset['longs'] += d_oi; asset['action'] = "🔥 BUY"
+                        else: asset['shorts'] += abs(d_oi); asset['action'] = "💀 SELL"
                 
-                prev_oi[s], prev_p[s] = oi_c, p
-            except Exception as e: print(f"Err {s}: {e}")
+                prev_oi[s], prev_p[s] = oi_usd, p
+                collection.update_one({"date": session_data["date"]}, {"$set": session_data}, upsert=True)
+            except: pass
         time.sleep(15)
 
 class Handler(BaseHTTPRequestHandler):
@@ -73,7 +72,8 @@ class Handler(BaseHTTPRequestHandler):
         rows = ""
         for s, d in session_data["assets"].items():
             f_clr = "#ff4444" if d['fund'] > 0.02 else "#00ff88" if d['fund'] < 0 else "#888"
-            r_clr = "#ff4444" if d['ratio'] > 2.0 else "#00ff88" if d['ratio'] < 0.8 else "#ccc"
+            r_clr = "#ff4444" if d['ratio'] > 1.8 else "#00ff88" if d['ratio'] < 0.9 else "#ccc"
+            l_clr = "#ffaa00" if d.get('liq',0) > 0 else "#444"
             rows += f"""
             <tr>
                 <td style='font-weight:bold;'>{s}</td>
@@ -81,23 +81,23 @@ class Handler(BaseHTTPRequestHandler):
                 <td style='color:#666;'>${d['vol']:,.0f}</td>
                 <td style='color:#00ff88;'>${d['longs']:,.0f}</td>
                 <td style='color:#ff4444;'>${d['shorts']:,.0f}</td>
+                <td style='color:{l_clr}; font-weight:bold;'>${d.get('liq',0):,.0f}</td>
                 <td style='color:{f_clr};'>{d['fund']:.4f}%</td>
                 <td style='color:{r_clr};'>{d['ratio']:.2f}</td>
-                <td style='color:#00d9ff;'>${d['oi']:,.0f}</td>
-                <td style='background:#222; font-weight:bold; color:{"#00ff88" if "BUY" in d['action'] else "#ff4444" if "SELL" in d['action'] else "#888"}'>{d['action']}</td>
+                <td style='background:#1a1a1a; color:{"#00ff88" if "BUY" in d['action'] else "#ff4444" if "SELL" in d['action'] else "#ffaa00"}'>{d['action']}</td>
             </tr>"""
         
         self.wfile.write(f"""
         <html><head><meta http-equiv='refresh' content='15'><style>
-            body {{ background: #050505; color: #eee; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }}
-            table {{ border-collapse: collapse; width: 100%; max-width: 1200px; background: #111; }}
-            th {{ background: #1a1a1a; padding: 12px; text-align: left; color: #555; font-size: 10px; }}
-            td {{ padding: 12px; border-bottom: 1px solid #222; font-family: monospace; font-size: 12px; }}
-            h1 {{ color: #00ff88; text-shadow: 0 0 10px rgba(0,255,136,0.2); }}
+            body {{ background: #050505; color: #eee; font-family: monospace; display: flex; flex-direction: column; align-items: center; padding: 15px; }}
+            table {{ border-collapse: collapse; width: 100%; max-width: 1250px; background: #0a0a0a; border: 1px solid #222; }}
+            th {{ background: #111; padding: 10px; text-align: left; color: #444; font-size: 10px; border-bottom: 1px solid #333; }}
+            td {{ padding: 12px; border-bottom: 1px solid #111; font-size: 12px; }}
+            h1 {{ color: #00ff88; font-size: 20px; text-shadow: 0 0 15px #00ff8855; }}
         </style></head><body>
-            <h1>CRYPTO WHALE TERMINAL v1.3</h1>
+            <h1>WHALE RADAR v1.4</h1>
             <table>
-                <tr><th>SYMBOL</th><th>PRICE</th><th>24H VOL</th><th>DAILY LONGS</th><th>DAILY SHORTS</th><th>FUNDING</th><th>L/S RATIO</th><th>OI (USD)</th><th>SIGNAL</th></tr>
+                <tr><th>SYMBOL</th><th>PRICE</th><th>24H VOL</th><th>LONGS</th><th>SHORTS</th><th>LAST LIQ</th><th>FUNDING</th><th>L/S RATIO</th><th>SIGNAL</th></tr>
                 {rows}
             </table>
         </body></html>""".encode())
