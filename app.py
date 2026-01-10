@@ -3,18 +3,15 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pymongo import MongoClient
 from datetime import datetime
 
-# Настройки активов
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 MONGO_URL = os.getenv("MONGO_URL")
 
-# Подключение к базе данных
 try:
     client = MongoClient(MONGO_URL)
     db = client.market_monitor
     collection = db.daily_stats
-    print("--- [DATABASE] Connected to MongoDB Atlas ---")
 except Exception as e:
-    print(f"--- [DATABASE ERROR] {e} ---")
+    print(f"DB Error: {e}")
 
 def load_from_db():
     today = datetime.now().strftime("%Y-%m-%d")
@@ -22,19 +19,13 @@ def load_from_db():
         data = collection.find_one({"date": today})
         if data: return data
     except: pass
-    # Если данных нет (новый день), создаем пустую структуру
-    return {
-        "date": today, 
-        "assets": {s: {"longs": 0.0, "shorts": 0.0, "exit": 0.0, "price": 0.0, "oi": 0.0, "action": "WAITING", "last_delta": 0.0} for s in SYMBOLS}
-    }
+    return {"date": today, "assets": {s: {"longs": 0.0, "shorts": 0.0, "exit": 0.0, "price": 0.0, "oi": 0.0, "oi_coins": 0.0, "action": "WAITING", "last_delta": 0.0, "coin_delta": 0.0} for s in SYMBOLS}}
 
 def save_to_db(data):
     today = datetime.now().strftime("%Y-%m-%d")
-    try:
-        collection.replace_one({"date": today}, data, upsert=True)
+    try: collection.replace_one({"date": today}, data, upsert=True)
     except: pass
 
-# Загружаем данные при старте сервера
 session_data = load_from_db()
 
 def format_currency(value):
@@ -58,102 +49,86 @@ class SmartTerminal(BaseHTTPRequestHandler):
             .header {{ background: #111; padding: 20px; border-radius: 12px; border-left: 8px solid #00ff88; margin-bottom: 20px; }}
             table {{ width: 100%; border-collapse: collapse; }}
             th {{ text-align: left; color: #444; font-size: 11px; text-transform: uppercase; padding: 10px; border-bottom: 2px solid #222; }}
-            td {{ padding: 12px 10px; border-bottom: 1px solid #151515; vertical-align: middle; }}
-            .action-box {{ display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }}
-            .action-tag {{ padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 10px; text-transform: uppercase; }}
-            .delta-val {{ font-size: 13px; font-weight: bold; font-family: monospace; }}
+            td {{ padding: 12px 10px; border-bottom: 1px solid #151515; }}
+            .action-tag {{ padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 10px; }}
+            .delta-coin {{ font-size: 11px; color: #888; font-family: monospace; }}
             .buy {{ color: #00ff88; }} .buy-bg {{ background: #004422; color: #00ff88; }}
             .sell {{ color: #ff4444; }} .sell-bg {{ background: #440011; color: #ff4444; }}
             .squeeze {{ color: #ffff00; }} .squeeze-bg {{ background: #444400; color: #ffff00; }}
             .flush {{ color: #ff8800; }} .flush-bg {{ background: #442200; color: #ff8800; }}
-            .wait {{ color: #444; }}
         </style></head><body>
             <div class="header">
-                <h1 style="margin:0; font-size: 24px; letter-spacing: 1px;">ORDERFLOW INTELLIGENCE</h1>
-                <small style="color:#666;">DATE: {session_data['date']} | DATABASE: ONLINE | REFRESH: 15s</small>
+                <h1 style="margin:0;">ORDERFLOW & BORROW MONITOR</h1>
+                <small style="color:#666;">DATABASE: ONLINE | REFRESH: 15s</small>
             </div>
             <table>
                 <tr>
                     <th>Asset / Price</th>
-                    <th>Live Market Action ($ΔOI)</th>
+                    <th>Action & Coin Borrow (Δ)</th>
                     <th>Daily Longs</th>
                     <th>Daily Shorts</th>
-                    <th>Daily Exit 🚪</th>
-                    <th>Total OI</th>
+                    <th>Total OI (Coins)</th>
                 </tr>
         """
         for s in SYMBOLS:
             a = assets.get(s, {})
             act = a.get('action', 'WAITING')
-            delta = a.get('last_delta', 0)
+            d_coin = a.get('coin_delta', 0)
+            coin_name = s.replace("USDT", "")
             
-            color_class, bg_class = "wait", ""
-            if "BUY" in act: color_class, bg_class = "buy", "buy-bg"
-            elif "SELL" in act: color_class, bg_class = "sell", "sell-bg"
-            elif "SQUEEZE" in act: color_class, bg_class = "squeeze", "squeeze-bg"
-            elif "FLUSH" in act: color_class, bg_class = "flush", "flush-bg"
+            cls, bg = ("buy", "buy-bg") if "BUY" in act else ("sell", "sell-bg") if "SELL" in act else ("squeeze", "squeeze-bg") if "SQUEEZE" in act else ("flush", "flush-bg") if "FLUSH" in act else ("wait", "")
 
             html += f"""
                 <tr>
-                    <td><b style="font-size:16px; color:#fff;">{s}</b><br><span style="color:#666; font-size:12px;">{a.get('price', 0):,.2f}$</span></td>
+                    <td><b style="font-size:16px;">{s}</b><br><small style="color:#666;">{a.get('price', 0):,.2f}$</small></td>
                     <td>
-                        <div class="action-box">
-                            <span class="action-tag {bg_class}">{act}</span>
-                            <span class="delta-val {color_class}">{'+' if delta > 0 else ''}{format_currency(delta)}$</span>
-                        </div>
+                        <span class="action-tag {bg}">{act}</span><br>
+                        <span class="delta-coin {cls}">{'↑' if d_coin > 0 else '↓' if d_coin < 0 else ''} {abs(d_coin):,.3f} {coin_name}</span>
                     </td>
                     <td style="color:#00ff88;">{format_currency(a.get('longs', 0))}$</td>
                     <td style="color:#ff4444;">{format_currency(a.get('shorts', 0))}$</td>
-                    <td style="color:#ffa500;">{format_currency(a.get('exit', 0))}$</td>
-                    <td style="color:#aaa; font-weight:bold;">${format_currency(a.get('oi', 0))}</td>
+                    <td>
+                        <b style="color:#fff;">${format_currency(a.get('oi', 0))}</b><br>
+                        <small style="color:#666;">{a.get('oi_coins', 0):,.2f} {coin_name}</small>
+                    </td>
                 </tr>
             """
         html += "</table></body></html>"
         self.wfile.write(html.encode('utf-8'))
-    def log_message(self, format, *args): return
 
 def monitor():
     global session_data
-    prev_oi, prev_price = {}, {}
-    print("--- [MONITOR] Orderflow tracking started ---")
+    prev_oi_coins, prev_price = {}, {}
     while True:
-        # Проверка смены суток
-        today = datetime.now().strftime("%Y-%m-%d")
-        if session_data["date"] != today:
-            session_data = load_from_db()
-
         for s in SYMBOLS:
             try:
-                # Получаем цену и Open Interest
                 r_p = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={s}", timeout=5).json()
                 r_oi = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=5).json()
                 
                 p = float(r_p['price'])
-                oi = float(r_oi['openInterest']) * p
+                oi_coins = float(r_oi['openInterest'])
+                oi_usd = oi_coins * p
                 
-                if s in prev_oi:
-                    d_oi = oi - prev_oi[s]
+                if s in prev_oi_coins:
+                    d_coins = oi_coins - prev_oi_coins[s]
                     d_p = p - prev_price[s]
                     
                     action = "WAITING"
-                    if abs(d_p) > 0: # Если цена сдвинулась
-                        if d_p > 0: action = "🔥 AGRESSIVE BUY" if d_oi > 0 else "⚡ SHORT SQUEEZE"
-                        else: action = "💀 AGRESSIVE SELL" if d_oi > 0 else "💧 LONG FLUSH"
+                    if d_p > 0: action = "🔥 AGRESSIVE BUY" if d_coins > 0 else "⚡ SHORT SQUEEZE"
+                    elif d_p < 0: action = "💀 AGRESSIVE SELL" if d_coins > 0 else "💧 LONG FLUSH"
                     
-                    # Обновляем состояние актива
                     asset_ref = session_data["assets"][s]
-                    asset_ref.update({"price": p, "oi": oi, "action": action, "last_delta": d_oi})
+                    asset_ref.update({"price": p, "oi": oi_usd, "oi_coins": oi_coins, "action": action, "coin_delta": d_coins})
                     
-                    # Накопительная логика
-                    if d_oi > 0:
-                        if d_p > 0: asset_ref['longs'] += d_oi
-                        else: asset_ref['shorts'] += d_oi
-                    else:
-                        asset_ref['exit'] += abs(d_oi)
+                    # Накопление
+                    if d_coins > 0:
+                        if d_p > 0: asset_ref['longs'] += (d_coins * p)
+                        else: asset_ref['shorts'] += (d_coins * p)
+                    else: asset_ref['exit'] += abs(d_coins * p)
                     
                     save_to_db(session_data)
                 
-                prev_oi[s], prev_price[s] = oi, p
+                prev_oi_coins[s], prev_price[s] = oi_coins, p
             except: pass
         time.sleep(15)
 
