@@ -4,7 +4,7 @@ from pymongo import MongoClient
 from datetime import datetime
 
 MONGO_URL = os.getenv("MONGO_URL")
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "1000WHYUSDT"]
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT", "SUIUSDT", "XRPUSDT", "1000WHYUSDT"]
 
 try:
     client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
@@ -28,7 +28,6 @@ def monitor():
     while True:
         for s in SYMBOLS:
             try:
-                # 1. Запросы к API
                 r_t = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={s}", timeout=5).json()
                 r_oi = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=5).json()
                 r_ls = requests.get(f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={s}&period=5m&limit=1", timeout=5).json()
@@ -39,7 +38,7 @@ def monitor():
                 ls_ratio = float(r_ls[0]['longShortRatio']) if r_ls else 0
                 
                 if s not in session_data["assets"]:
-                    session_data["assets"][s] = {"longs":0.0, "shorts":0.0, "exit":0.0, "liq":0.0, "price":p, "ls":ls_ratio, "oi":oi_usd}
+                    session_data["assets"][s] = {"longs":0.0, "shorts":0.0, "exit":0.0, "liq":0.0, "price":p, "ls":ls_ratio, "oi":oi_usd, "vol":vol_24h}
                 
                 asset = session_data["assets"][s]
                 asset.update({"price": p, "ls": ls_ratio, "oi": oi_usd, "vol": vol_24h})
@@ -53,14 +52,13 @@ def monitor():
                         else: asset['shorts'] += d_oi
                     else:
                         asset['exit'] += abs(d_oi)
-                        # Если цена сильно дернулась при падении OI - считаем это ликвидацией (упрощенно)
                         if abs(d_p/p) > 0.001: asset['liq'] += abs(d_oi)
                 
                 prev_oi[s], prev_p[s] = oi_usd, p
             except: pass
         
         collection.update_one({"date": session_data["date"]}, {"$set": session_data}, upsert=True)
-        time.sleep(12)
+        time.sleep(10)
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -69,34 +67,41 @@ class Handler(BaseHTTPRequestHandler):
         for s in SYMBOLS:
             d = session_data["assets"].get(s, {})
             ls = d.get('ls', 0)
-            ls_clr = "#ff4444" if ls > 1.5 else "#00ff88" if ls < 0.8 else "#aaa"
+            ls_clr = "#ff4444" if ls > 1.8 else "#00ff88" if ls < 0.8 else "#aaa"
+            
+            # Расчет Pressure (Дисбаланс входов)
+            l, sh = d.get('longs', 0), d.get('shorts', 0)
+            total = l + sh
+            pressure = ((l - sh) / total * 100) if total > 0 else 0
+            pres_clr = "#00ff88" if pressure > 20 else "#ff4444" if pressure < -20 else "#555"
+
             price = d.get('price', 0)
-            p_format = f"{price:,.8f}" if price < 0.01 else f"{price:,.4f}" if price < 100 else f"{price:,.2f}"
+            p_str = f"{price:,.8f}" if price < 0.01 else f"{price:,.4f}" if price < 100 else f"{price:,.2f}"
 
             rows += f"""<tr>
-                <td class='sym'><b>{s}</b></td>
-                <td class='num'>{p_format}</td>
-                <td class='num' style='color:{ls_clr}; font-weight:bold;'>{ls:.2f}</td>
-                <td class='num' style='color:#00ff88;'>${d.get('longs',0):,.0f}</td>
-                <td class='num' style='color:#ff4444;'>${d.get('shorts',0):,.0f}</td>
-                <td class='num' style='color:#ffaa00;'>${d.get('exit',0):,.0f}</td>
-                <td class='num' style='color:#ff0055; background:rgba(255,0,85,0.1); font-weight:bold;'>${d.get('liq',0):,.0f}</td>
-                <td class='num' style='color:#00d9ff;'>${d.get('oi',0):,.0f}</td>
+                <td style='color:#00ff88; font-size:18px;'><b>{s}</b></td>
+                <td style='font-family:monospace;'>{p_str}</td>
+                <td style='color:{ls_clr}; font-weight:bold;'>{ls:.2f}</td>
+                <td style='color:{pres_clr}; font-weight:bold;'>{pressure:+.1f}%</td>
+                <td style='color:#777;'>${d.get('vol',0):,.0;f}</td>
+                <td style='color:#00ff88;'>${l:,.0f}</td>
+                <td style='color:#ff4444;'>${sh:,.0f}</td>
+                <td style='color:#ffaa00;'>${d.get('exit',0):,.0f}</td>
+                <td style='color:#ff0055; background:rgba(255,0,85,0.05);'>${d.get('liq',0):,.0f}</td>
+                <td style='color:#00d9ff;'>${d.get('oi',0):,.0f}</td>
             </tr>"""
         
-        self.wfile.write(f"""<html><head><meta http-equiv='refresh' content='12'><style>
+        self.wfile.write(f"""<html><head><meta http-equiv='refresh' content='10'><style>
             body {{ background:#050505; color:#eee; font-family:sans-serif; padding:20px; }}
-            table {{ border-collapse:collapse; width:100%; max-width:1400px; background:#0a0a0a; border:2px solid #222; }}
-            th {{ background:#151515; padding:15px; text-align:left; color:#666; font-size:12px; border-bottom:2px solid #333; }}
-            td {{ padding:18px; border-bottom:1px solid #111; font-size:16px; min-width:120px; }}
-            .sym {{ color:#00ff88; font-size:18px; }}
-            .num {{ font-family:'Courier New', monospace; text-align:right; }}
-            h1 {{ color:#00ff88; letter-spacing:2px; margin-bottom:30px; }}
+            table {{ border-collapse:collapse; width:100%; max-width:1600px; background:#0a0a0a; }}
+            th {{ background:#111; padding:15px; color:#444; font-size:10px; text-align:left; border-bottom:2px solid #222; }}
+            td {{ padding:15px; border-bottom:1px solid #111; font-size:15px; }}
         </style></head><body>
-            <h1>WHALE TERMINAL v2.5</h1>
+            <h1>WHALE TERMINAL v2.8</h1>
             <table>
                 <tr>
-                    <th>SYMBOL</th><th>PRICE</th><th>L/S RATIO</th><th>LONGS (IN)</th><th>SHORTS (IN)</th><th>EXITS (OUT)</th><th>LIQUIDATIONS</th><th>OPEN INTEREST</th>
+                    <th>SYMBOL</th><th>PRICE</th><th>L/S RATIO</th><th>PRESSURE</th><th>24H VOLUME</th>
+                    <th>LONGS (IN)</th><th>SHORTS (IN)</th><th>EXITS (OUT)</th><th>LIQ</th><th>OPEN INTEREST</th>
                 </tr>
                 {rows}
             </table>
