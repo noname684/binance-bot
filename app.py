@@ -1,75 +1,84 @@
-import requests, time, threading
+import requests, time, threading, os, json
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pymongo import MongoClient
+from datetime import datetime
 
-# Настройки
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
-session_data = {
-    "start_time": time.time(),
-    "assets": {s: {"longs": 0.1, "shorts": 0.1, "exit": 0, "price": 0, "oi": 0, "last_diff": 0} for s in SYMBOLS}
-}
+MONGO_URL = os.getenv("MONGO_URL", "твой_url")
+
+try:
+    client = MongoClient(MONGO_URL)
+    db = client.market_monitor
+    collection = db.daily_stats
+except: pass
+
+def load_from_db():
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        data = collection.find_one({"date": today})
+        if data: return data
+    except: pass
+    return {"date": today, "assets": {s: {"longs": 1.0, "shorts": 1.0, "exit": 0, "price": 0, "oi": 0, "action": "WAITING"} for s in SYMBOLS}}
+
+def save_to_db(data):
+    today = datetime.now().strftime("%Y-%m-%d")
+    try: collection.replace_one({"date": today}, data, upsert=True)
+    except: pass
+
+session_data = load_from_db()
 
 def format_currency(value):
     abs_val = abs(value)
     if abs_val >= 1_000_000_000: return f"{value / 1_000_000_000:.2f}B"
     elif abs_val >= 1_000_000: return f"{value / 1_000_000:.2f}M"
-    elif abs_val >= 1_000: return f"{value / 1_000:.0f}k"
     return f"{value:.0f}"
 
-class DeepMetricsTerminal(BaseHTTPRequestHandler):
+class SmartTerminal(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
         
-        t_l = sum(a['longs'] for a in session_data['assets'].values())
-        t_s = sum(a['shorts'] for a in session_data['assets'].values())
-        power = (t_l / (t_l + t_s + 0.1)) * 100
-        color = "#ff4444" if power < 45 else "#00ff88" if power > 55 else "#ffd700"
-
+        assets = session_data["assets"]
         html = f"""
         <html><head><meta http-equiv="refresh" content="15">
         <style>
-            body {{ background: #050505; color: #e0e0e0; font-family: 'Inter', sans-serif; padding: 20px; }}
-            .header {{ background: #111; padding: 20px; border-radius: 12px; margin-bottom: 25px; border-bottom: 3px solid {color}; }}
-            table {{ width: 100%; border-collapse: collapse; border-radius: 8px; overflow: hidden; }}
-            th {{ text-align: left; font-size: 10px; color: #555; padding: 12px; background: #0c0c0c; }}
-            td {{ padding: 15px 12px; border-bottom: 1px solid #151515; font-size: 14px; background: #0a0a0a; }}
-            .up {{ color: #00ff88; }} .down {{ color: #ff4444; }} .exit {{ color: #ffd700; }}
-            .trend-bar {{ height: 4px; background: #222; border-radius: 2px; margin-top: 8px; width: 100px; }}
-            .trend-fill {{ height: 100%; border-radius: 2px; }}
+            body {{ background: #050505; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; padding: 20px; }}
+            .header {{ background: #111; padding: 20px; border-radius: 12px; border-left: 8px solid #00ff88; margin-bottom: 20px; }}
+            table {{ width: 100%; border-collapse: collapse; }}
+            th {{ text-align: left; color: #444; font-size: 12px; padding: 10px; border-bottom: 2px solid #222; }}
+            td {{ padding: 15px 10px; border-bottom: 1px solid #151515; }}
+            .action-tag {{ padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }}
+            .buy {{ background: #004422; color: #00ff88; }}
+            .sell {{ background: #440011; color: #ff4444; }}
+            .squeeze {{ background: #444400; color: #ffff00; }}
+            .flush {{ background: #442200; color: #ff8800; }}
         </style></head><body>
             <div class="header">
-                <span style="font-size: 28px; font-weight: 900; color: {color};">GLOBAL SENSE: {power:.1f}%</span>
-                <span style="float: right; color: #444;">ACTIVE SINCE: {int((time.time()-session_data['start_time'])/60)}m</span>
+                <h1 style="margin:0;">SMART ORDERFLOW TERMINAL</h1>
+                <small style="color:#666;">DB: ONLINE | MONITORING {len(SYMBOLS)} ASSETS</small>
             </div>
             <table>
                 <tr>
                     <th>ASSET / PRICE</th>
-                    <th>STRENGTH / TREND</th>
-                    <th>SESSION LONG</th>
-                    <th>SESSION SHORT</th>
-                    <th>SESSION EXIT</th>
+                    <th>MARKET ACTION</th>
+                    <th>DAILY LONGS</th>
+                    <th>DAILY SHORTS</th>
                     <th>TOTAL OI</th>
                 </tr>
         """
         for s in SYMBOLS:
-            a = session_data['assets'][s]
-            # Расчет силы тренда для каждой монеты
-            asset_total = a['longs'] + a['shorts']
-            asset_power = (a['longs'] / asset_total) * 100
-            a_color = "#00ff88" if asset_power > 50 else "#ff4444"
+            a = assets[s]
+            act = a.get('action', 'NEUTRAL')
+            cls = "buy" if "BUY" in act else "sell" if "SELL" in act else "squeeze" if "SQUEEZE" in act else "flush"
             
             html += f"""
                 <tr>
-                    <td><b style="font-size:16px;">{s}</b><br><span style="color:#666;">{a['price']:,.2f}$</span></td>
-                    <td>
-                        <b style="color:{a_color}">{asset_power:.1f}%</b>
-                        <div class="trend-bar"><div class="trend-fill" style="width:{asset_power}%; background:{a_color};"></div></div>
-                    </td>
-                    <td class="up">{format_currency(a['longs'])}$</td>
-                    <td class="down">{format_currency(a['shorts'])}$</td>
-                    <td class="exit">{format_currency(a['exit'])}$</td>
-                    <td><b style="color:#aaa">${format_currency(a['oi'])}</b></td>
+                    <td><b style="font-size:18px; color:#fff;">{s}</b><br><span style="color:#666;">{a['price']:,.2f}$</span></td>
+                    <td><span class="action-tag {cls}">{act}</span></td>
+                    <td style="color:#00ff88;">{format_currency(a['longs'])}$</td>
+                    <td style="color:#ff4444;">{format_currency(a['shorts'])}$</td>
+                    <td style="color:#aaa; font-weight:bold;">${format_currency(a['oi'])}</td>
                 </tr>
             """
         html += "</table></body></html>"
@@ -79,6 +88,7 @@ class DeepMetricsTerminal(BaseHTTPRequestHandler):
 def monitor():
     global session_data
     prev_oi = {}
+    prev_price = {}
     while True:
         for s in SYMBOLS:
             try:
@@ -87,24 +97,29 @@ def monitor():
                 p = float(r_p['price'])
                 oi = float(r_oi['openInterest']) * p
                 
-                if s in prev_oi:
-                    diff = oi - prev_oi[s]
-                    session_data['assets'][s]['price'] = p
-                    session_data['assets'][s]['oi'] = oi
+                if s in prev_oi and s in prev_price:
+                    d_oi = oi - prev_oi[s]
+                    d_p = p - prev_price[s]
                     
-                    if abs(diff) > 20000:
-                        if diff > 0:
-                            session_data['assets'][s]['longs'] += diff
-                        else:
-                            session_data['assets'][s]['shorts'] += abs(diff)
-                            session_data['assets'][s]['exit'] += abs(diff) * 0.4
-                else:
-                    session_data['assets'][s]['price'] = p
-                    session_data['assets'][s]['oi'] = oi
+                    # Логика определения действия
+                    action = "WAITING"
+                    if d_p > 0 and d_oi > 10000: action = "🔥 AGRESSIVE BUY"
+                    elif d_p > 0 and d_oi < -10000: action = "⚡ SHORT SQUEEZE"
+                    elif d_p < 0 and d_oi > 10000: action = "💀 AGRESSIVE SELL"
+                    elif d_p < 0 and d_oi < -10000: action = "💧 LONG FLUSH"
+                    
+                    session_data["assets"][s].update({"price": p, "oi": oi, "action": action})
+                    
+                    if d_oi > 20000: session_data["assets"][s]['longs'] += d_oi
+                    elif d_oi < -20000: session_data["assets"][s]['shorts'] += abs(d_oi)
+                    
+                    save_to_db(session_data)
+                
                 prev_oi[s] = oi
+                prev_price[s] = p
             except: pass
         time.sleep(15)
 
 if __name__ == "__main__":
     threading.Thread(target=monitor, daemon=True).start()
-    HTTPServer(('0.0.0.0', 10000), DeepMetricsTerminal).serve_forever()
+    HTTPServer(('0.0.0.0', 10000), SmartTerminal).serve_forever()
