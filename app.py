@@ -28,46 +28,41 @@ def monitor():
     while True:
         for s in SYMBOLS:
             try:
-                # 1. Основные данные (OI, Price, LS Ratio)
+                # Запросы к API
                 r_t = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={s}", timeout=5).json()
                 r_oi = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=5).json()
-                r_ls = requests.get(f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={s}&period=5m&limit=1", timeout=5).json()
-                
-                # 2. ДАННЫЕ ПО РЕАЛЬНЫМ РЫНОЧНЫМ УДАРАМ (Taker Volume)
                 r_dv = requests.get(f"https://fapi.binance.com/futures/data/takerbuybuyvol?symbol={s}&period=5m&limit=1", timeout=5).json()
                 
                 p = float(r_t['lastPrice'])
                 oi_usd = float(r_oi['openInterest']) * p
-                ls_ratio = float(r_ls[0]['longShortRatio']) if r_ls else 0
                 
-                # Считаем Дельту (Покупки минус Продажи по рынку)
+                # Тейкеры и Мейкеры
                 if r_dv:
-                    mkt_buy = float(r_dv[0]['buyVol']) * p
-                    mkt_sell = (float(r_dv[0]['vol']) * p) - mkt_buy
-                    mkt_delta = mkt_buy - mkt_sell
+                    t_buy = float(r_dv[0]['buyVol']) * p  # Тейкер купил (значит Мейкер продал)
+                    t_sell = (float(r_dv[0]['vol']) * p) - t_buy # Тейкер продал (значит Мейкер купил)
+                    m_buy, m_sell = t_sell, t_buy # Прямая зеркальная логика
                 else:
-                    mkt_delta = 0
+                    t_buy = t_sell = m_buy = m_sell = 0
 
                 if s not in session_data["assets"]:
-                    session_data["assets"][s] = {"longs":0, "shorts":0, "exit":0, "liq":0, "mkt_delta":0}
+                    session_data["assets"][s] = {"longs":0, "shorts":0, "exit":0, "t_buy":0, "t_sell":0, "m_buy":0, "m_sell":0}
                 
                 asset = session_data["assets"][s]
-                asset.update({"price": p, "ls": ls_ratio, "oi": oi_usd, "vol": float(r_t['quoteVolume']), "mkt_delta": mkt_delta})
+                asset.update({
+                    "price": p, "oi": oi_usd, "vol": float(r_t['quoteVolume']),
+                    "t_buy": t_buy, "t_sell": t_sell, "m_buy": m_buy, "m_sell": m_sell
+                })
 
                 if s in prev_oi:
                     d_oi = oi_usd - prev_oi[s]
-                    d_p = p - prev_p[s]
-                    
                     if d_oi > 0:
-                        if d_p >= 0: asset['longs'] += d_oi
+                        if p >= prev_p[s]: asset['longs'] += d_oi
                         else: asset['shorts'] += d_oi
                     else:
                         asset['exit'] += abs(d_oi)
-                        if abs(d_p/p) > 0.0015: asset['liq'] += abs(d_oi)
                 
                 prev_oi[s], prev_p[s] = oi_usd, p
-            except Exception as e:
-                print(f"Error {s}: {e}")
+            except: pass
         
         collection.update_one({"date": session_data["date"]}, {"$set": session_data}, upsert=True)
         time.sleep(10)
@@ -80,38 +75,35 @@ class Handler(BaseHTTPRequestHandler):
             d = session_data["assets"].get(s, {})
             if not d: continue
             
-            delta = d.get('mkt_delta', 0)
-            d_clr = "#00ff88" if delta > 0 else "#ff4444"
-            
-            ls = d.get('ls', 0)
-            ls_clr = "#ff4444" if ls > 1.8 else "#00ff88" if ls < 0.8 else "#aaa"
-
+            # Рендерим строки
             rows += f"""<tr>
-                <td style='color:#00ff88; font-size:18px;'><b>{s}</b></td>
-                <td style='font-family:monospace;'>{d.get('price',0):,.4f}</td>
-                <td style='color:{ls_clr}; font-weight:bold;'>{ls:.2f}</td>
-                <td style='color:{d_clr}; font-weight:bold; background:rgba(0,0,0,0.3);'>${delta:,.0f}</td>
-                <td style='color:#666;'>${d.get('vol',0):,.0f}</td>
-                <td style='color:#00ff88;'>${d.get('longs',0):,.0f}</td>
-                <td style='color:#ff4444;'>${d.get('shorts',0):,.0f}</td>
-                <td style='color:#ffaa00;'>${d.get('exit',0):,.0f}</td>
-                <td style='color:#ff0055;'>${d.get('liq',0):,.0f}</td>
+                <td style='color:#00ff88;'><b>{s}</b></td>
+                <td>{d.get('price',0):,.4f}</td>
+                <td style='color:#00ff88;'>${d.get('t_buy',0):,.0f}</td>
+                <td style='color:#ff4444;'>${d.get('t_sell',0):,.0f}</td>
+                <td style='border-left:2px solid #333; color:#00ff88; opacity:0.7;'>${d.get('m_buy',0):,.0f}</td>
+                <td style='color:#ff4444; opacity:0.7;'>${d.get('m_sell',0):,.0f}</td>
+                <td style='color:#666; border-left:2px solid #333;'>${d.get('vol',0):,.0f}</td>
                 <td style='color:#00d9ff;'>${d.get('oi',0):,.0f}</td>
             </tr>"""
         
-        html = f"""<html><head><meta http-equiv='refresh' content='10'><style>
-            body {{ background:#050505; color:#eee; font-family:sans-serif; padding:15px; }}
-            table {{ border-collapse:collapse; width:100%; max-width:1600px; background:#0a0a0a; }}
+        self.wfile.write(f"""<html><head><meta http-equiv='refresh' content='10'><style>
+            body {{ background:#050505; color:#eee; font-family:sans-serif; }}
+            table {{ border-collapse:collapse; width:100%; background:#0a0a0a; }}
             th {{ background:#111; padding:12px; color:#444; font-size:10px; text-align:left; }}
-            td {{ padding:15px; border-bottom:1px solid #181818; font-size:14px; }}
+            td {{ padding:15px; border-bottom:1px solid #181818; font-size:13px; }}
         </style></head><body>
-            <h1>WHALE RADAR v3.1 (NET DELTA)</h1>
+            <h1 style='color:#00ff88; padding:10px;'>TAKER VS MAKER RADAR v3.2</h1>
             <table>
-                <tr><th>SYMBOL</th><th>PRICE</th><th>L/S RATIO</th><th>MKT DELTA (5m)</th><th>24H VOL</th><th>LONGS (OI)</th><th>SHORTS (OI)</th><th>EXITS</th><th>LIQ</th><th>OI USD</th></tr>
+                <tr>
+                    <th>SYMBOL</th><th>PRICE</th>
+                    <th style='color:#00ff88;'>TAKER BUY (Mkt)</th><th style='color:#ff4444;'>TAKER SELL (Mkt)</th>
+                    <th style='color:#00ff88;'>MAKER BUY (Lim)</th><th style='color:#ff4444;'>MAKER SELL (Lim)</th>
+                    <th>24H VOL</th><th>OI USD</th>
+                </tr>
                 {rows}
             </table>
-        </body></html>"""
-        self.wfile.write(html.encode())
+        </body></html>""".encode())
 
 if __name__ == "__main__":
     threading.Thread(target=monitor, daemon=True).start()
