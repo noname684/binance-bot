@@ -1,121 +1,103 @@
 import requests, time, threading, os
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from pymongo import MongoClient
-from datetime import datetime
 
-MONGO_URL = os.getenv("MONGO_URL")
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT", "SUIUSDT", "XRPUSDT", "1000WHYUSDT"]
-
-try:
-    client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
-    db = client.market_monitor
-    collection = db.daily_stats
-except: pass
-
-def load_data():
-    today = datetime.now().strftime("%Y-%m-%d")
-    try:
-        data = collection.find_one({"date": today})
-        if data: return data
-    except: pass
-    return {"date": today, "assets": {}}
-
-session_data = load_data()
+# Инициализация хранилища данных
+data_store = {s: {"p":0, "ls":0, "tb":0, "ts":0, "l":0, "sh":0, "ex":0, "liq":0, "oi":0, "v":0} for s in SYMBOLS}
 
 def monitor():
-    global session_data
-    prev_oi, prev_p = {}, {}
+    prev = {}
     while True:
         for s in SYMBOLS:
             try:
-                # 1. Данные по OI и Цене
-                r_t = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={s}", timeout=5).json()
-                r_oi = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=5).json()
-                r_ls = requests.get(f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={s}&period=5m&limit=1", timeout=5).json()
+                # 1. Запрос рыночных данных
+                t = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={s}", timeout=5).json()
+                o = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=5).json()
+                ls = requests.get(f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={s}&period=5m&limit=1", timeout=5).json()
+                # 2. Запрос Taker Volume (для Тейкеров и Мейкеров)
+                dv = requests.get(f"https://fapi.binance.com/futures/data/takerbuybuyvol?symbol={s}&period=5m&limit=1", timeout=5).json()
                 
-                # 2. Данные по Тейкерам (Market Orders)
-                r_dv = requests.get(f"https://fapi.binance.com/futures/data/takerbuybuyvol?symbol={s}&period=5m&limit=1", timeout=5).json()
+                p = float(t['lastPrice'])
+                oi_usd = float(o['openInterest']) * p
                 
-                p = float(r_t['lastPrice'])
-                oi_usd = float(r_oi['openInterest']) * p
-                ls_ratio = float(r_ls[0]['longShortRatio']) if r_ls else 0
+                # Тейкеры (Рыночные)
+                tb = float(dv[0]['buyVol']) * p if dv else 0
+                ts = (float(dv[0]['vol']) * p) - tb if dv else 0
                 
-                if r_dv:
-                    t_buy = float(r_dv[0]['buyVol']) * p
-                    t_sell = (float(r_dv[0]['vol']) * p) - t_buy
-                else: t_buy = t_sell = 0
+                # Мейкеры (Лимитные) - Зеркальное отображение тейкеров
+                mb = ts # Maker Buy = Taker Sell
+                ms = tb # Maker Sell = Taker Buy
+                
+                data_store[s].update({
+                    "p": p, "ls": float(ls[0]['longShortRatio']) if ls else 0, 
+                    "tb": tb, "ts": ts, "mb": mb, "ms": ms,
+                    "oi": oi_usd, "v": float(t['quoteVolume'])
+                })
 
-                if s not in session_data["assets"]:
-                    session_data["assets"][s] = {"longs":0, "shorts":0, "exit":0, "liq":0, "t_buy":0, "t_sell":0}
-                
-                asset = session_data["assets"][s]
-                asset.update({"price": p, "ls": ls_ratio, "oi": oi_usd, "vol": float(r_t['quoteVolume']), "t_buy": t_buy, "t_sell": t_sell})
-
-                if s in prev_oi:
-                    d_oi = oi_usd - prev_oi[s]
-                    d_p = p - prev_p[s]
-                    
+                if s in prev:
+                    d_oi = oi_usd - prev[s]['oi']
+                    d_p = p - prev[s]['p']
                     if d_oi > 0:
-                        if d_p >= 0: asset['longs'] += d_oi
-                        else: asset['shorts'] += d_oi
+                        if d_p >= 0: data_store[s]['l'] += d_oi
+                        else: data_store[s]['sh'] += d_oi
                     else:
-                        asset['exit'] += abs(d_oi)
-                        if abs(d_p/p) > 0.0015: asset['liq'] += abs(d_oi)
+                        data_store[s]['ex'] += abs(d_oi)
+                        if abs(d_p/p) > 0.0015: data_store[s]['liq'] += abs(d_oi)
                 
-                prev_oi[s], prev_p[s] = oi_usd, p
+                prev[s] = {"oi": oi_usd, "p": p}
             except: pass
-        
-        collection.update_one({"date": session_data["date"]}, {"$set": session_data}, upsert=True)
         time.sleep(10)
 
-class Handler(BaseHTTPRequestHandler):
+class H(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.send_header("Content-type", "text/html; charset=utf-8"); self.end_headers()
         rows = ""
-        for s in SYMBOLS:
-            d = session_data["assets"].get(s, {})
-            if not d: continue
-            
-            ls = d.get('ls', 0)
-            ls_clr = "#ff4444" if ls > 1.8 else "#00ff88" if ls < 0.8 else "#aaa"
-            
-            tb, ts = d.get('t_buy',0), d.get('t_sell',0)
-            pressure = ((tb - ts) / (tb + ts) * 100) if (tb + ts) > 0 else 0
-            p_clr = "#00ff88" if pressure > 15 else "#ff4444" if pressure < -15 else "#888"
+        for s, d in data_store.items():
+            # Расчет Pressure
+            total_mkt = d['tb'] + d['ts']
+            pres = ((d['tb'] - d['ts']) / total_mkt * 100) if total_mkt > 0 else 0
+            pres_clr = "#00ff88" if pres > 0 else "#ff4444"
 
             rows += f"""<tr>
-                <td style='color:#00ff88; font-size:16px;'><b>{s}</b></td>
-                <td style='font-family:monospace;'>{d.get('price',0):,.4f}</td>
-                <td style='color:{ls_clr}; font-weight:bold;'>{ls:.2f}</td>
-                <td style='color:{p_clr}; font-weight:bold;'>{pressure:+.1f}%</td>
-                <td style='color:#00ff88; background:rgba(0,255,136,0.05);'>${tb:,.0f}</td>
-                <td style='color:#ff4444; background:rgba(255,68,68,0.05);'>${ts:,.0f}</td>
-                <td style='border-left:2px solid #333; color:#00ff88;'>${d.get('longs',0):,.0f}</td>
-                <td style='color:#ff4444;'>${d.get('shorts',0):,.0f}</td>
-                <td style='color:#ffaa00;'>${d.get('exit',0):,.0f}</td>
-                <td style='color:#ff0055;'>${d.get('liq',0):,.0f}</td>
-                <td style='color:#00d9ff;'>${d.get('oi',0):,.0f}</td>
-                <td style='color:#555; font-size:11px;'>${d.get('vol',0):,.0f}</td>
+                <td style='color:#00ff88; font-size:18px;'><b>{s}</b></td>
+                <td style='font-family:monospace; font-size:16px;'>{d['p']:,.4f}</td>
+                <td style='color:#aaa; font-weight:bold;'>{d['ls']:.2f}</td>
+                <td style='color:{pres_clr}; font-weight:bold; font-size:16px;'>{pres:+.1f}%</td>
+                
+                <td style='color:#00ff88; background:rgba(0,255,136,0.05);'>${d['tb']:,.0f}</td>
+                <td style='color:#ff4444; background:rgba(255,68,68,0.05);'>${d['ts']:,.0f}</td>
+                
+                <td style='color:#00ff88; opacity:0.6;'>${d['mb']:,.0f}</td>
+                <td style='color:#ff4444; opacity:0.6;'>${d['ms']:,.0f}</td>
+                
+                <td style='border-left:2px solid #333; color:#00ff88;'>${d['l']:,.0f}</td>
+                <td style='color:#ff4444;'>${d['sh']:,.0f}</td>
+                <td style='color:#ffaa00;'>${d['ex']:,.0f}</td>
+                <td style='color:#ff0055; font-weight:bold;'>${d['liq']:,.0f}</td>
+                
+                <td style='color:#00d9ff;'>${d['oi']:,.0f}</td>
+                <td style='color:#444; font-size:11px;'>${d['v']:,.0f}</td>
             </tr>"""
         
         self.wfile.write(f"""<html><head><meta http-equiv='refresh' content='10'><style>
-            body {{ background:#050505; color:#eee; font-family:sans-serif; padding:10px; }}
-            table {{ border-collapse:collapse; width:100%; background:#0a0a0a; }}
-            th {{ background:#111; padding:10px; color:#444; font-size:9px; text-align:left; border-bottom:2px solid #222; }}
-            td {{ padding:12px; border-bottom:1px solid #181818; font-size:13px; }}
+            body{{background:#050505; color:#eee; font-family:sans-serif; padding:20px;}}
+            table{{width:100%; border-collapse:collapse; background:#0a0a0a; border:1px solid #222;}}
+            th{{background:#111; padding:15px; color:#555; font-size:11px; text-align:left; text-transform:uppercase; border-bottom:2px solid #333;}}
+            td{{padding:15px; border-bottom:1px solid #181818; font-size:14px;}}
+            .section-head {{ border-left: 2px solid #333; }}
         </style></head><body>
-            <h1 style='color:#00ff88; font-size:20px;'>ULTIMATE WHALE RADAR v3.3</h1>
+            <h1 style='color:#00ff88;'>WHALE RADAR PRO v3.5 <span style='color:#333; font-size:14px;'>[DESKTOP ONLY]</span></h1>
             <table>
                 <tr>
-                    <th>SYMBOL</th><th>PRICE</th><th>L/S</th><th>PRESS</th>
-                    <th style='color:#00ff88;'>TAKER BUY</th><th style='color:#ff4444;'>TAKER SELL</th>
-                    <th style='border-left:2px solid #333;'>LONGS(OI)</th><th>SHORTS(OI)</th><th>EXITS</th><th>LIQ</th><th>OI USD</th><th>24H VOL</th>
+                    <th>Symbol</th><th>Price</th><th>L/S Ratio</th><th>Pressure</th>
+                    <th style='color:#00ff88;'>Taker Buy (Mkt)</th><th style='color:#ff4444;'>Taker Sell (Mkt)</th>
+                    <th style='color:#008844;'>Maker Buy (Lim)</th><th style='color:#880022;'>Maker Sell (Lim)</th>
+                    <th class='section-head'>Longs (OI)</th><th>Shorts (OI)</th><th>Exits</th><th>Liq</th>
+                    <th>Open Interest</th><th>24H Volume</th>
                 </tr>
                 {rows}
             </table>
         </body></html>""".encode())
 
-if __name__ == "__main__":
-    threading.Thread(target=monitor, daemon=True).start()
-    port = int(os.environ.get("PORT", 10000))
-    HTTPServer(('0.0.0.0', port), Handler).serve_forever()
+threading.Thread(target=monitor, daemon=True).start()
+HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 10000))), H).serve_forever()
