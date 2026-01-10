@@ -1,13 +1,41 @@
 import requests, time, threading, os
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pymongo import MongoClient
+from datetime import datetime
 
+MONGO_URL = os.getenv("MONGO_URL")
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT", "SUIUSDT", "XRPUSDT", "1000WHYUSDT"]
-# Инициализация с полным набором ключей сразу, чтобы избежать KeyError
-data_store = {s: {"p":0, "ls":0, "tb":0, "ts":0, "mb":0, "ms":0, "l":0, "sh":0, "ex":0, "liq":0, "oi":0, "v":0} for s in SYMBOLS}
+
+# 1. ПОДКЛЮЧЕНИЕ К БАЗЕ И ЗАГРУЗКА ДАННЫХ
+try:
+    client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+    db = client.market_monitor
+    collection = db.daily_stats
+except: client = None
+
+def load_from_db():
+    today = datetime.now().strftime("%Y-%m-%d")
+    default = {s: {"p":0, "ls":0, "tb":0, "ts":0, "mb":0, "ms":0, "l":0, "sh":0, "ex":0, "liq":0, "oi":0, "v":0} for s in SYMBOLS}
+    if client:
+        try:
+            doc = collection.find_one({"date": today})
+            if doc and "assets" in doc:
+                # Берем старые данные и дополняем их новыми ключами если нужно
+                for s in SYMBOLS:
+                    if s in doc["assets"]:
+                        default[s].update(doc["assets"][s])
+                return default
+        except: pass
+    return default
+
+# Инициализируем данные из базы при старте
+data_store = load_from_db()
 
 def monitor():
+    global data_store
     prev = {}
     while True:
+        today = datetime.now().strftime("%Y-%m-%d")
         for s in SYMBOLS:
             try:
                 t = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={s}", timeout=5).json()
@@ -20,11 +48,9 @@ def monitor():
                 tb = float(dv[0]['buyVol']) * p if dv else 0
                 ts = (float(dv[0]['vol']) * p) - tb if dv else 0
                 
-                # Обновляем данные в хранилище
                 data_store[s].update({
                     "p": p, "ls": float(ls[0]['longShortRatio']) if ls else 0, 
-                    "tb": tb, "ts": ts, "mb": ts, "ms": tb,
-                    "oi": oi_usd, "v": float(t['quoteVolume'])
+                    "tb": tb, "ts": ts, "mb": ts, "ms": tb, "oi": oi_usd, "v": float(t['quoteVolume'])
                 })
 
                 if s in prev:
@@ -39,6 +65,13 @@ def monitor():
                 
                 prev[s] = {"oi": oi_usd, "p": p}
             except: pass
+        
+        # СОХРАНЕНИЕ В БАЗУ КАЖДЫЙ ЦИКЛ
+        if client:
+            try:
+                collection.update_one({"date": today}, {"$set": {"assets": data_store}}, upsert=True)
+            except: pass
+            
         time.sleep(10)
 
 class H(BaseHTTPRequestHandler):
@@ -52,40 +85,9 @@ class H(BaseHTTPRequestHandler):
             pres = ((tb - ts) / total * 100) if total > 0 else 0
             pres_clr = "#00ff88" if pres > 0 else "#ff4444"
 
-            rows += f"""<tr>
-                <td style='color:#00ff88; font-size:16px;'><b>{s}</b></td>
-                <td style='font-family:monospace;'>{d.get('p',0):,.4f}</td>
-                <td style='color:#aaa;'>{d.get('ls',0):,.2f}</td>
-                <td style='color:{pres_clr}; font-weight:bold;'>{pres:+.1f}%</td>
-                <td style='color:#00ff88;'>${tb:,.0f}</td>
-                <td style='color:#ff4444;'>${ts:,.0f}</td>
-                <td style='color:#00ff88; opacity:0.5;'>${d.get('mb',0):,.0f}</td>
-                <td style='color:#ff4444; opacity:0.5;'>${d.get('ms',0):,.0f}</td>
-                <td style='border-left:2px solid #333; color:#00ff88;'>${d.get('l',0):,.0f}</td>
-                <td style='color:#ff4444;'>${d.get('sh',0):,.0f}</td>
-                <td style='color:#ffaa00;'>${d.get('ex',0):,.0f}</td>
-                <td style='color:#ff0055;'>${d.get('liq',0):,.0f}</td>
-                <td style='color:#00d9ff;'>${d.get('oi',0):,.0f}</td>
-                <td style='color:#444; font-size:11px;'>${d.get('v',0):,.0f}</td>
-            </tr>"""
+            rows += f"<tr><td style='color:#00ff88;'><b>{s}</b></td><td>{d['p']:,.4f}</td><td>{d['ls']:.2f}</td><td style='color:{pres_clr}'>{pres:+.1f}%</td><td>${tb:,.0f}</td><td>${ts:,.0f}</td><td style='color:#00ff88; opacity:0.5;'>${d['mb']:,.0f}</td><td style='color:#ff4444; opacity:0.5;'>${d['ms']:,.0f}</td><td style='border-left:2px solid #333; color:#00ff88;'>${d['l']:,.0f}</td><td style='color:#ff4444;'>${d['sh']:,.0f}</td><td style='color:#ffaa00;'>${d['ex']:,.0f}</td><td style='color:#ff0055;'>${d['liq']:,.0f}</td><td style='color:#00d9ff;'>${d['oi']:,.0f}</td></tr>"
         
-        self.wfile.write(f"""<html><head><meta http-equiv='refresh' content='10'><style>
-            body{{background:#050505; color:#eee; font-family:sans-serif; padding:20px;}}
-            table{{width:100%; border-collapse:collapse; background:#0a0a0a;}}
-            th{{background:#111; padding:12px; color:#444; font-size:10px; text-align:left; text-transform:uppercase;}}
-            td{{padding:12px; border-bottom:1px solid #181818; font-size:13px;}}
-        </style></head><body>
-            <h1 style='color:#00ff88;'>WHALE RADAR PRO v3.5.1</h1>
-            <table>
-                <tr>
-                    <th>Symbol</th><th>Price</th><th>L/S</th><th>Press</th>
-                    <th style='color:#00ff88;'>Taker Buy</th><th style='color:#ff4444;'>Taker Sell</th>
-                    <th style='color:#008844;'>Maker Buy</th><th style='color:#880022;'>Maker Sell</th>
-                    <th style='border-left:2px solid #333;'>Longs(OI)</th><th>Shorts(OI)</th><th>Exits</th><th>Liq</th><th>OI USD</th><th>24h Vol</th>
-                </tr>
-                {rows}
-            </table>
-        </body></html>""".encode())
+        self.wfile.write(f"<html><head><meta http-equiv='refresh' content='10'><style>body{{background:#050505;color:#eee;font-family:sans-serif;padding:20px;}}table{{width:100%;border-collapse:collapse;}}th{{background:#111;padding:12px;color:#444;font-size:10px;text-align:left;}}td{{padding:12px;border-bottom:1px solid #181818;font-size:13px;}}</style></head><body><h1>WHALE RADAR v3.6 (WITH DB MEMORY)</h1><table><tr><th>Symbol</th><th>Price</th><th>L/S</th><th>Press</th><th>Taker Buy</th><th>Taker Sell</th><th>Maker Buy</th><th>Maker Sell</th><th style='border-left:2px solid #333;'>Longs(OI)</th><th>Shorts(OI)</th><th>Exits</th><th>Liq</th><th>OI USD</th></tr>{rows}</table></body></html>".encode())
 
 threading.Thread(target=monitor, daemon=True).start()
 HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 10000))), H).serve_forever()
