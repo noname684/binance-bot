@@ -6,7 +6,6 @@ from datetime import datetime
 MONGO_URL = os.getenv("MONGO_URL")
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 
-# Подключение к БД
 try:
     client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
     db = client.market_monitor
@@ -21,7 +20,7 @@ def load_data():
         data = collection.find_one({"date": today})
         if data: return data
     except: pass
-    return {"date": today, "assets": {s: {"longs": 0.0, "shorts": 0.0, "exit": 0.0, "price": 0.0, "oi": 0.0, "vol": 0.0, "action": "WAITING"} for s in SYMBOLS}}
+    return {"date": today, "assets": {s: {"longs": 0.0, "shorts": 0.0, "exit": 0.0, "price": 0.0, "oi": 0.0, "vol": 0.0, "ratio": 0.0, "fund": 0.0, "liq": 0.0, "action": "WAITING"} for s in SYMBOLS}}
 
 session_data = load_data()
 
@@ -31,89 +30,77 @@ def monitor():
     while True:
         for s in SYMBOLS:
             try:
-                # Запрос цены и объема за 24 часа
-                res_ticker = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={s}", timeout=5).json()
-                res_oi = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=5).json()
+                # 1. Цена, Объем и Фандинг
+                r_t = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={s}", timeout=5).json()
+                r_f = requests.get(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={s}", timeout=5).json()
                 
-                if 'lastPrice' not in res_ticker or 'openInterest' not in res_oi: continue
+                # 2. Open Interest
+                r_oi = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=5).json()
                 
-                p = float(res_ticker['lastPrice'])
-                vol_usd = float(res_ticker['quoteVolume']) # Объем в USDT за 24ч
-                oi_count = float(res_oi['openInterest'])
-                current_oi_usd = oi_count * p
+                # 3. Long/Short Ratio (Топ трейдеры по позициям)
+                r_ls = requests.get(f"https://fapi.binance.com/fapi/v1/data/topLongShortAccountRatio?symbol={s}&period=5m&limit=1", timeout=5).json()
+
+                if 'lastPrice' not in r_t or 'openInterest' not in r_oi: continue
                 
+                p = float(r_t['lastPrice'])
+                oi_c = float(r_oi['openInterest'])
                 asset = session_data["assets"][s]
+                
                 asset["price"] = p
-                asset["oi"] = current_oi_usd
-                asset["vol"] = vol_usd # Сохраняем объем
+                asset["vol"] = float(r_t['quoteVolume'])
+                asset["oi"] = oi_c * p
+                asset["fund"] = float(r_f.get('lastFundingRate', 0)) * 100 # в процентах
+                if r_ls: asset["ratio"] = float(r_ls[0]['longShortRatio'])
                 
                 if s in prev_oi:
-                    d_oi = oi_count - prev_oi[s]
+                    d_oi = oi_c - prev_oi[s]
                     d_p = p - prev_p[s]
-                    
                     if d_oi > 0:
-                        if d_p > 0: 
-                            asset['longs'] += (d_oi * p)
-                            asset['action'] = "🔥 AGRESSIVE BUY"
-                        else: 
-                            asset['shorts'] += (d_oi * p)
-                            asset['action'] = "💀 AGRESSIVE SELL"
+                        if d_p > 0: asset['longs'] += (d_oi * p); asset['action'] = "🔥 BUY"
+                        else: asset['shorts'] += (d_oi * p); asset['action'] = "💀 SELL"
                     elif d_oi < 0:
-                        asset['exit'] += abs(d_oi * p)
-                        asset['action'] = "💧 EXIT/LIQUIDATION"
+                        asset['exit'] += abs(d_oi * p); asset['action'] = "💧 EXIT"
                     
                     collection.update_one({"date": session_data["date"]}, {"$set": session_data}, upsert=True)
                 
-                prev_oi[s], prev_p[s] = oi_count, p
-            except: pass
+                prev_oi[s], prev_p[s] = oi_c, p
+            except Exception as e: print(f"Err {s}: {e}")
         time.sleep(15)
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.end_headers()
+        self.send_response(200); self.send_header("Content-type", "text/html; charset=utf-8"); self.end_headers()
         rows = ""
         for s, d in session_data["assets"].items():
-            color = "#00ff88" if "BUY" in d['action'] else "#ff4444" if "SELL" in d['action'] else "#888"
-            # Рассчитываем соотношение OI к Объему для понимания силы движения
+            f_clr = "#ff4444" if d['fund'] > 0.02 else "#00ff88" if d['fund'] < 0 else "#888"
+            r_clr = "#ff4444" if d['ratio'] > 2.0 else "#00ff88" if d['ratio'] < 0.8 else "#ccc"
             rows += f"""
             <tr>
-                <td>{s}</td>
+                <td style='font-weight:bold;'>{s}</td>
                 <td>{d['price']:,.2f}</td>
-                <td style='color:#ccc;'>${d.get('vol',0):,.0f}</td>
-                <td style='color:#00ff88;'>${d.get('longs',0):,.0f}</td>
-                <td style='color:#ff4444;'>${d.get('shorts',0):,.0f}</td>
-                <td style='color:#ffaa00;'>${d.get('exit',0):,.0f}</td>
-                <td style='color:#00d9ff;'>${d.get('oi',0):,.0f}</td>
-                <td style='color:{color}; font-weight:bold;'>{d['action']}</td>
+                <td style='color:#666;'>${d['vol']:,.0f}</td>
+                <td style='color:#00ff88;'>${d['longs']:,.0f}</td>
+                <td style='color:#ff4444;'>${d['shorts']:,.0f}</td>
+                <td style='color:{f_clr};'>{d['fund']:.4f}%</td>
+                <td style='color:{r_clr};'>{d['ratio']:.2f}</td>
+                <td style='color:#00d9ff;'>${d['oi']:,.0f}</td>
+                <td style='background:#222; font-weight:bold; color:{"#00ff88" if "BUY" in d['action'] else "#ff4444" if "SELL" in d['action'] else "#888"}'>{d['action']}</td>
             </tr>"""
-            
-        html = f"""
-        <html>
-        <head>
-            <meta http-equiv='refresh' content='15'>
-            <style>
-                body {{ background: #050505; color: #eee; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }}
-                table {{ border-collapse: collapse; width: 98%; max-width: 1200px; background: #111; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }}
-                th {{ background: #1a1a1a; padding: 15px; text-align: left; color: #666; font-size: 11px; border-bottom: 2px solid #222; }}
-                td {{ padding: 14px; border-bottom: 1px solid #222; font-family: 'Courier New', monospace; font-size: 13px; }}
-                h1 {{ color: #00ff88; margin-bottom: 5px; }}
-                .info {{ color: #444; margin-bottom: 20px; font-size: 12px; }}
-            </style>
-        </head>
-        <body>
-            <h1>MARKET MONITOR v1.2</h1>
-            <div class='info'>24H VOLUME & REAL-TIME ORDERFLOW DATA</div>
+        
+        self.wfile.write(f"""
+        <html><head><meta http-equiv='refresh' content='15'><style>
+            body {{ background: #050505; color: #eee; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }}
+            table {{ border-collapse: collapse; width: 100%; max-width: 1200px; background: #111; }}
+            th {{ background: #1a1a1a; padding: 12px; text-align: left; color: #555; font-size: 10px; }}
+            td {{ padding: 12px; border-bottom: 1px solid #222; font-family: monospace; font-size: 12px; }}
+            h1 {{ color: #00ff88; text-shadow: 0 0 10px rgba(0,255,136,0.2); }}
+        </style></head><body>
+            <h1>CRYPTO WHALE TERMINAL v1.3</h1>
             <table>
-                <tr>
-                    <th>SYMBOL</th><th>PRICE</th><th>24H VOLUME</th><th>DAILY LONGS</th><th>DAILY SHORTS</th><th>DAILY EXITS</th><th>OI (USD)</th><th>SIGNAL</th>
-                </tr>
+                <tr><th>SYMBOL</th><th>PRICE</th><th>24H VOL</th><th>DAILY LONGS</th><th>DAILY SHORTS</th><th>FUNDING</th><th>L/S RATIO</th><th>OI (USD)</th><th>SIGNAL</th></tr>
                 {rows}
             </table>
-        </body>
-        </html>"""
-        self.wfile.write(html.encode('utf-8'))
+        </body></html>""".encode())
 
 if __name__ == "__main__":
     threading.Thread(target=monitor, daemon=True).start()
