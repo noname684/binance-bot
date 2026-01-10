@@ -2,35 +2,28 @@ import requests, time, threading, os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT", "SUIUSDT", "XRPUSDT", "1000WHYUSDT"]
-# Инициализация хранилища данных
-data_store = {s: {"p":0, "ls":0, "tb":0, "ts":0, "l":0, "sh":0, "ex":0, "liq":0, "oi":0, "v":0} for s in SYMBOLS}
+# Инициализация с полным набором ключей сразу, чтобы избежать KeyError
+data_store = {s: {"p":0, "ls":0, "tb":0, "ts":0, "mb":0, "ms":0, "l":0, "sh":0, "ex":0, "liq":0, "oi":0, "v":0} for s in SYMBOLS}
 
 def monitor():
     prev = {}
     while True:
         for s in SYMBOLS:
             try:
-                # 1. Запрос рыночных данных
                 t = requests.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={s}", timeout=5).json()
                 o = requests.get(f"https://fapi.binance.com/fapi/v1/openInterest?symbol={s}", timeout=5).json()
                 ls = requests.get(f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={s}&period=5m&limit=1", timeout=5).json()
-                # 2. Запрос Taker Volume (для Тейкеров и Мейкеров)
                 dv = requests.get(f"https://fapi.binance.com/futures/data/takerbuybuyvol?symbol={s}&period=5m&limit=1", timeout=5).json()
                 
                 p = float(t['lastPrice'])
                 oi_usd = float(o['openInterest']) * p
-                
-                # Тейкеры (Рыночные)
                 tb = float(dv[0]['buyVol']) * p if dv else 0
                 ts = (float(dv[0]['vol']) * p) - tb if dv else 0
                 
-                # Мейкеры (Лимитные) - Зеркальное отображение тейкеров
-                mb = ts # Maker Buy = Taker Sell
-                ms = tb # Maker Sell = Taker Buy
-                
+                # Обновляем данные в хранилище
                 data_store[s].update({
                     "p": p, "ls": float(ls[0]['longShortRatio']) if ls else 0, 
-                    "tb": tb, "ts": ts, "mb": mb, "ms": ms,
+                    "tb": tb, "ts": ts, "mb": ts, "ms": tb,
                     "oi": oi_usd, "v": float(t['quoteVolume'])
                 })
 
@@ -52,48 +45,43 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.send_header("Content-type", "text/html; charset=utf-8"); self.end_headers()
         rows = ""
-        for s, d in data_store.items():
-            # Расчет Pressure
-            total_mkt = d['tb'] + d['ts']
-            pres = ((d['tb'] - d['ts']) / total_mkt * 100) if total_mkt > 0 else 0
+        for s in SYMBOLS:
+            d = data_store[s]
+            tb, ts = d.get('tb', 0), d.get('ts', 0)
+            total = tb + ts
+            pres = ((tb - ts) / total * 100) if total > 0 else 0
             pres_clr = "#00ff88" if pres > 0 else "#ff4444"
 
             rows += f"""<tr>
-                <td style='color:#00ff88; font-size:18px;'><b>{s}</b></td>
-                <td style='font-family:monospace; font-size:16px;'>{d['p']:,.4f}</td>
-                <td style='color:#aaa; font-weight:bold;'>{d['ls']:.2f}</td>
-                <td style='color:{pres_clr}; font-weight:bold; font-size:16px;'>{pres:+.1f}%</td>
-                
-                <td style='color:#00ff88; background:rgba(0,255,136,0.05);'>${d['tb']:,.0f}</td>
-                <td style='color:#ff4444; background:rgba(255,68,68,0.05);'>${d['ts']:,.0f}</td>
-                
-                <td style='color:#00ff88; opacity:0.6;'>${d['mb']:,.0f}</td>
-                <td style='color:#ff4444; opacity:0.6;'>${d['ms']:,.0f}</td>
-                
-                <td style='border-left:2px solid #333; color:#00ff88;'>${d['l']:,.0f}</td>
-                <td style='color:#ff4444;'>${d['sh']:,.0f}</td>
-                <td style='color:#ffaa00;'>${d['ex']:,.0f}</td>
-                <td style='color:#ff0055; font-weight:bold;'>${d['liq']:,.0f}</td>
-                
-                <td style='color:#00d9ff;'>${d['oi']:,.0f}</td>
-                <td style='color:#444; font-size:11px;'>${d['v']:,.0f}</td>
+                <td style='color:#00ff88; font-size:16px;'><b>{s}</b></td>
+                <td style='font-family:monospace;'>{d.get('p',0):,.4f}</td>
+                <td style='color:#aaa;'>{d.get('ls',0):,.2f}</td>
+                <td style='color:{pres_clr}; font-weight:bold;'>{pres:+.1f}%</td>
+                <td style='color:#00ff88;'>${tb:,.0f}</td>
+                <td style='color:#ff4444;'>${ts:,.0f}</td>
+                <td style='color:#00ff88; opacity:0.5;'>${d.get('mb',0):,.0f}</td>
+                <td style='color:#ff4444; opacity:0.5;'>${d.get('ms',0):,.0f}</td>
+                <td style='border-left:2px solid #333; color:#00ff88;'>${d.get('l',0):,.0f}</td>
+                <td style='color:#ff4444;'>${d.get('sh',0):,.0f}</td>
+                <td style='color:#ffaa00;'>${d.get('ex',0):,.0f}</td>
+                <td style='color:#ff0055;'>${d.get('liq',0):,.0f}</td>
+                <td style='color:#00d9ff;'>${d.get('oi',0):,.0f}</td>
+                <td style='color:#444; font-size:11px;'>${d.get('v',0):,.0f}</td>
             </tr>"""
         
         self.wfile.write(f"""<html><head><meta http-equiv='refresh' content='10'><style>
             body{{background:#050505; color:#eee; font-family:sans-serif; padding:20px;}}
-            table{{width:100%; border-collapse:collapse; background:#0a0a0a; border:1px solid #222;}}
-            th{{background:#111; padding:15px; color:#555; font-size:11px; text-align:left; text-transform:uppercase; border-bottom:2px solid #333;}}
-            td{{padding:15px; border-bottom:1px solid #181818; font-size:14px;}}
-            .section-head {{ border-left: 2px solid #333; }}
+            table{{width:100%; border-collapse:collapse; background:#0a0a0a;}}
+            th{{background:#111; padding:12px; color:#444; font-size:10px; text-align:left; text-transform:uppercase;}}
+            td{{padding:12px; border-bottom:1px solid #181818; font-size:13px;}}
         </style></head><body>
-            <h1 style='color:#00ff88;'>WHALE RADAR PRO v3.5 <span style='color:#333; font-size:14px;'>[DESKTOP ONLY]</span></h1>
+            <h1 style='color:#00ff88;'>WHALE RADAR PRO v3.5.1</h1>
             <table>
                 <tr>
-                    <th>Symbol</th><th>Price</th><th>L/S Ratio</th><th>Pressure</th>
-                    <th style='color:#00ff88;'>Taker Buy (Mkt)</th><th style='color:#ff4444;'>Taker Sell (Mkt)</th>
-                    <th style='color:#008844;'>Maker Buy (Lim)</th><th style='color:#880022;'>Maker Sell (Lim)</th>
-                    <th class='section-head'>Longs (OI)</th><th>Shorts (OI)</th><th>Exits</th><th>Liq</th>
-                    <th>Open Interest</th><th>24H Volume</th>
+                    <th>Symbol</th><th>Price</th><th>L/S</th><th>Press</th>
+                    <th style='color:#00ff88;'>Taker Buy</th><th style='color:#ff4444;'>Taker Sell</th>
+                    <th style='color:#008844;'>Maker Buy</th><th style='color:#880022;'>Maker Sell</th>
+                    <th style='border-left:2px solid #333;'>Longs(OI)</th><th>Shorts(OI)</th><th>Exits</th><th>Liq</th><th>OI USD</th><th>24h Vol</th>
                 </tr>
                 {rows}
             </table>
